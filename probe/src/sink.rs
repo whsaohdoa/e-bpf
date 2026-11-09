@@ -1,34 +1,49 @@
-//! Storage backends for captured packets.
+//! CSV storage backends: one row per unique sample record and one row per
+//! merged aggregate window key.
 //!
-//! The eBPF side stops at `probe_common::PacketEvent`; everything that decides
-//! *where* events go lives here.  Adding a database backend means adding a new
-//! [`Sink`] implementation and a new arm in [`create_sink`] — no change to the
-//! eBPF program or to the ring buffer ABI.
-//!
-//! CSV columns (fixed order):
+//! Two independent files are produced:
 //!
 //! ```text
-//! ts_unix_ms,iface,src_ip,dst_ip,src_port,dst_port,protocol
+//! samples:    ts_unix_ms,iface,src_ip,dst_ip,src_port,dst_port,protocol
+//! aggregates: window_start_ms,window_end_ms,iface,direction,src_prefix,dst_addr,
+//!             dst_port,protocol,action,rule_id,count,first_seen_ms,last_seen_ms,
+//!             sample_dropped,degraded,window_complete
 //! ```
 //!
-//! `src_port`/`dst_port` are emitted as empty fields in this revision (L4 is
-//! not parsed yet); `protocol` is already the real IPv4 protocol number or the
-//! IPv6 base-header Next Header.  Addresses are formatted with `Display`, so
-//! IPv6 rows use the standard compressed form (`fd00:99::2`).  The columns are
-//! present from day one so enabling L4 later does not change the CSV schema.
+//! Both schemas have a fixed column count.  Ports are always integers (0 for
+//! ICMP/ICMPv6) so a parser can index by column number; aggregate counters and
+//! flags are integers as well.  Addresses use `Display`, so IPv6 rows use the
+//! standard compressed form (`fd00:99::2`) and IPv4 prefixes are CIDR
+//! (`10.99.0.0/24`).
+//!
+//! The eBPF side stops at `probe_common`; everything that decides *where* rows
+//! go lives here.  Adding a database backend means adding a new [`Sink`]/
+//! [`AggSink`] implementation and a new arm in the `create_*` functions.
+//!
+//! Both writers always keep the file open in `O_APPEND` mode: two probes may
+//! write the same CSV concurrently (one per veth end, as in
+//! `verification/run_e2e_ipv6.sh`).  Without `O_APPEND` a truncating writer
+//! keeps its own file offset and would silently overwrite rows appended by the
+//! other process.  `--append` only controls whether the file is emptied once on
+//! startup; the header is (re)written whenever the file is empty.
 
 use std::{
     fs::{File, OpenOptions},
     io::{BufWriter, Write},
+    mem::size_of,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     path::Path,
 };
 
 use anyhow::{Context as _, Result};
 use clap::ValueEnum;
-use probe_common::{EVENT_ABI_VERSION, FAMILY_IPV4, FAMILY_IPV6, PacketEvent};
+use probe_common::{FAMILY_IPV4, FAMILY_IPV6, ProbeConfig, SampleEvent};
 
-/// A decoded event, independent of the ring buffer ABI.
+use crate::aggregate::{
+    AggRecord, Clock, format_action, format_direction, format_dst_addr, format_src_prefix,
+};
+
+/// A decoded sample, independent of the ring buffer ABI.
 #[derive(Clone, Copy, Debug)]
 pub struct Event {
     pub ts_unix_ms: u64,
@@ -40,17 +55,14 @@ pub struct Event {
 }
 
 impl Event {
-    /// Converts one ring buffer record into a userspace event.
+    /// Converts one `SampleEvent` into a userspace sample row.
     ///
-    /// Returns `None` when the record is not a v2 record with a known address
-    /// family; the caller counts those as malformed instead of interpreting
-    /// them with the wrong layout.  Addresses are stored as raw network-order
-    /// bytes by the eBPF side, so no byte swapping happens here.
-    pub fn from_abi(raw: &PacketEvent, ts_unix_ms: u64) -> Option<Self> {
-        if raw.version != EVENT_ABI_VERSION {
-            return None;
-        }
-
+    /// Returns `None` when the address family is neither IPv4 nor IPv6; the
+    /// caller counts those records as malformed instead of interpreting the
+    /// addresses with the wrong layout.  Addresses are stored as raw
+    /// network-order bytes by the eBPF side, so no byte swapping happens here;
+    /// the ports are big-endian on the wire, hence `from_be`.
+    pub fn from_abi(raw: &SampleEvent, ts_unix_ms: u64) -> Option<Self> {
         let (src_ip, dst_ip) = match raw.family {
             FAMILY_IPV4 => (
                 IpAddr::V4(Ipv4Addr::new(
@@ -84,11 +96,32 @@ impl Event {
     }
 }
 
-/// Pluggable persistence layer.  Implementations must be usable from the async
-/// main task (`Send`) and are allowed to buffer internally; `flush` is called
-/// periodically and once more on shutdown.
+/// Decodes exactly one ring-buffer record into the shared ABI struct.
+///
+/// The record length must be *exactly* `size_of::<SampleEvent>()`: a shorter
+/// (e.g. the 48-byte record of the previous ABI) or longer record means loader
+/// and object disagree and is rejected as malformed instead of being read with
+/// the wrong layout.  `read_unaligned` is used because the ring-buffer consumer
+/// position is only guaranteed to be 4-byte aligned, not 8-byte aligned.
+pub fn decode_sample(record: &[u8]) -> Option<SampleEvent> {
+    if record.len() != size_of::<SampleEvent>() {
+        return None;
+    }
+    // SAFETY: the length check above proves the slice contains one complete
+    // `SampleEvent`; `read_unaligned` does not require an aligned pointer and
+    // the returned value is owned (no reference into the ring buffer).
+    Some(unsafe { std::ptr::read_unaligned(record.as_ptr().cast::<SampleEvent>()) })
+}
+
+/// Pluggable persistence layer for sample rows.
 pub trait Sink: Send {
     fn write_batch(&mut self, events: &[Event]) -> Result<()>;
+    fn flush(&mut self) -> Result<()>;
+}
+
+/// Pluggable persistence layer for merged aggregate rows.
+pub trait AggSink: Send {
+    fn write_rows(&mut self, rows: &[AggRecord]) -> Result<()>;
     fn flush(&mut self) -> Result<()>;
 }
 
@@ -99,7 +132,7 @@ pub enum SinkKind {
     Csv,
 }
 
-/// Builds the sink selected on the command line.
+/// Builds the sample sink selected on the command line.
 pub fn create_sink(
     kind: SinkKind,
     path: &Path,
@@ -111,55 +144,76 @@ pub fn create_sink(
     }
 }
 
-/// CSV backend: one header row, then `ts_unix_ms,iface,src_ip,dst_ip` per event
-/// (plus the reserved port columns and the protocol number).
+/// Builds the aggregate CSV sink.
+///
+/// The window bounds and `first_seen`/`last_seen` columns are rendered with the
+/// same [`Clock`] as the sample `ts_unix_ms`, and the prefix lengths come from
+/// the read-back `ProbeConfig`.
+pub fn create_agg_sink(
+    path: &Path,
+    iface: &str,
+    append: bool,
+    config: ProbeConfig,
+    clock: Clock,
+) -> Result<Box<dyn AggSink>> {
+    Ok(Box::new(AggCsvSink::create(
+        path, iface, append, config, clock,
+    )?))
+}
+
+/// Opens `path` for appending, creating parent directories as needed.
+///
+/// Without `append` the file is truncated once; afterwards the writer only ever
+/// appends, so a concurrent writer cannot lose rows.
+fn open_append(path: &Path, append: bool) -> Result<BufWriter<File>> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create output directory {}", parent.display()))?;
+    }
+    // `OpenOptions` rejects `truncate + append`, so the non-append case empties
+    // the file explicitly and then appends from row 0.
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("open output file {}", path.display()))?;
+    if !append {
+        file.set_len(0)
+            .with_context(|| format!("truncate output file {}", path.display()))?;
+    }
+    Ok(BufWriter::new(file))
+}
+
+/// Writes `header` when the file is still empty (fresh file or `--append` run
+/// that found no previous rows).
+fn write_header_if_empty(writer: &mut BufWriter<File>, path: &Path, header: &str) -> Result<()> {
+    let empty = writer
+        .get_ref()
+        .metadata()
+        .with_context(|| format!("stat output file {}", path.display()))?
+        .len()
+        == 0;
+    if empty {
+        writeln!(writer, "{header}").context("write CSV header")?;
+        // Make the header visible immediately, even if no packet arrives.
+        writer.flush().context("flush CSV header")?;
+    }
+    Ok(())
+}
+
+/// Sample CSV backend: one header row, then the fixed 7-column sample rows.
 pub struct CsvSink {
     writer: BufWriter<File>,
     iface: String,
 }
 
 impl CsvSink {
-    pub const HEADER: &'static str =
-        "ts_unix_ms,iface,src_ip,dst_ip,src_port,dst_port,protocol";
+    pub const HEADER: &'static str = "ts_unix_ms,iface,src_ip,dst_ip,src_port,dst_port,protocol";
 
-    /// Opens `path`.  Without `append` the file is truncated and the header is
-    /// written; with `append` the header is only added when the file is empty,
-    /// so successive runs accumulate rows instead of overwriting them.
     pub fn create(path: &Path, iface: &str, append: bool) -> Result<Self> {
-        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("create output directory {}", parent.display()))?;
-        }
-
-        // Always append: two probes may write the same CSV concurrently (one per
-        // veth end, as in verification/run_e2e_ipv6.sh).  Without O_APPEND a
-        // truncating writer keeps its own file offset and would silently
-        // overwrite rows appended by the other process.  `OpenOptions` rejects
-        // `truncate + append`, so the non-append case truncates explicitly.
-        let file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .append(true)
-            .open(path)
-            .with_context(|| format!("open output file {}", path.display()))?;
-        if !append {
-            // Fresh run: empty the file once; writes then append from row 0.
-            file.set_len(0)
-                .with_context(|| format!("truncate output file {}", path.display()))?;
-        }
-        let write_header = file
-            .metadata()
-            .with_context(|| format!("stat output file {}", path.display()))?
-            .len()
-            == 0;
-
-        let mut writer = BufWriter::new(file);
-        if write_header {
-            writeln!(writer, "{}", Self::HEADER).context("write CSV header")?;
-            // Make the header visible immediately, even if no packet arrives.
-            writer.flush().context("flush CSV header")?;
-        }
-
+        let mut writer = open_append(path, append)?;
+        write_header_if_empty(&mut writer, path, Self::HEADER)?;
         Ok(Self {
             writer,
             iface: iface.to_owned(),
@@ -170,29 +224,26 @@ impl CsvSink {
 impl Sink for CsvSink {
     fn write_batch(&mut self, events: &[Event]) -> Result<()> {
         for event in events {
-            // Ports are printed as empty fields while they are 0 (L4 is not
-            // parsed yet); once the eBPF side fills them in, the same writer
-            // emits the numbers without a schema change.
-            write!(
+            // Ports are always integers, so the row always has 7 columns;
+            // ICMP/ICMPv6 rows simply carry 0 for both ports.
+            writeln!(
                 self.writer,
-                "{},{},{},{},",
-                event.ts_unix_ms, self.iface, event.src_ip, event.dst_ip
+                "{},{},{},{},{},{},{}",
+                event.ts_unix_ms,
+                self.iface,
+                event.src_ip,
+                event.dst_ip,
+                event.src_port,
+                event.dst_port,
+                event.protocol
             )
-            .context("write CSV row")?;
-            if event.src_port != 0 {
-                write!(self.writer, "{}", event.src_port).context("write CSV row")?;
-            }
-            write!(self.writer, ",").context("write CSV row")?;
-            if event.dst_port != 0 {
-                write!(self.writer, "{}", event.dst_port).context("write CSV row")?;
-            }
-            writeln!(self.writer, ",{}", event.protocol).context("write CSV row")?;
+            .context("write sample CSV row")?;
         }
         Ok(())
     }
 
     fn flush(&mut self) -> Result<()> {
-        self.writer.flush().context("flush CSV file")
+        self.writer.flush().context("flush sample CSV file")
     }
 }
 
@@ -204,20 +255,96 @@ impl Drop for CsvSink {
     }
 }
 
+/// Aggregate CSV backend: one header row, then the fixed 16-column rows.
+pub struct AggCsvSink {
+    writer: BufWriter<File>,
+    iface: String,
+    config: ProbeConfig,
+    clock: Clock,
+}
+
+impl AggCsvSink {
+    pub const HEADER: &'static str = "window_start_ms,window_end_ms,iface,direction,src_prefix,dst_addr,dst_port,protocol,action,rule_id,count,first_seen_ms,last_seen_ms,sample_dropped,degraded,window_complete";
+
+    pub fn create(
+        path: &Path,
+        iface: &str,
+        append: bool,
+        config: ProbeConfig,
+        clock: Clock,
+    ) -> Result<Self> {
+        let mut writer = open_append(path, append)?;
+        write_header_if_empty(&mut writer, path, Self::HEADER)?;
+        Ok(Self {
+            writer,
+            iface: iface.to_owned(),
+            config,
+            clock,
+        })
+    }
+}
+
+impl AggSink for AggCsvSink {
+    fn write_rows(&mut self, rows: &[AggRecord]) -> Result<()> {
+        for row in rows {
+            let key = &row.key;
+            writeln!(
+                self.writer,
+                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+                self.clock
+                    .window_start_ms(row.window_id, self.config.window_ns),
+                self.clock
+                    .window_end_ms(row.window_id, self.config.window_ns),
+                self.iface,
+                format_direction(key.direction),
+                format_src_prefix(key, &self.config),
+                format_dst_addr(key),
+                key.dst_port,
+                key.protocol,
+                format_action(key.action),
+                key.rule_id,
+                row.count,
+                self.clock.unix_ms(row.first_seen),
+                self.clock.unix_ms(row.last_seen),
+                u8::from(row.sample_dropped),
+                u8::from(row.degraded),
+                u8::from(row.window_complete),
+            )
+            .context("write aggregate CSV row")?;
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        self.writer.flush().context("flush aggregate CSV file")
+    }
+}
+
+impl Drop for AggCsvSink {
+    fn drop(&mut self) {
+        let _ = self.writer.flush();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::aggregate::{AggTable, Clock};
+    use probe_common::{ACTION_PASS, AggKey, CONFIG_VERSION, DIRECTION_INGRESS, ProbeConfig};
 
-    fn raw_event(family: u8, src: [u8; 16], dst: [u8; 16], protocol: u8) -> PacketEvent {
-        PacketEvent {
+    fn raw_event(family: u8, src: [u8; 16], dst: [u8; 16], protocol: u8) -> SampleEvent {
+        SampleEvent {
             ts_ns: 1,
+            window_id: 0,
             src_addr: src,
             dst_addr: dst,
             src_port: 0,
             dst_port: 0,
             protocol,
             family,
-            version: EVENT_ABI_VERSION,
+            action: ACTION_PASS,
+            reason: 0,
+            rule_id: 0,
             reserved: 0,
         }
     }
@@ -228,44 +355,199 @@ mod tests {
         addr
     }
 
+    /// Serialises a `SampleEvent` to its 64-byte in-memory form, the way the
+    /// ring buffer delivers it.
+    fn abi_bytes(sample: &SampleEvent) -> Vec<u8> {
+        // SAFETY: `SampleEvent` is `#[repr(C)]`, has no pointers and is fully
+        // initialised, so its whole object representation is readable.
+        unsafe {
+            std::slice::from_raw_parts(
+                (sample as *const SampleEvent).cast::<u8>(),
+                size_of::<SampleEvent>(),
+            )
+            .to_vec()
+        }
+    }
+
     #[test]
-    fn decodes_ipv4_from_left_aligned_bytes() {
-        let raw = raw_event(
+    fn decodes_a_full_64_byte_ipv4_record() {
+        let mut raw = raw_event(
             FAMILY_IPV4,
             ipv4_bytes(10, 99, 0, 2),
             ipv4_bytes(10, 99, 0, 1),
-            1,
+            17,
         );
-        let event = Event::from_abi(&raw, 1234).expect("valid v2 IPv4 record");
+        raw.src_port = 0x1234u16.to_be();
+        raw.dst_port = 0x00ddu16.to_be();
+
+        let record = abi_bytes(&raw);
+        assert_eq!(record.len(), 64, "the current ABI record is 64 bytes");
+        let decoded = decode_sample(&record).expect("64-byte record is a SampleEvent");
+        assert_eq!(decoded.ts_ns, 1);
+
+        let event = Event::from_abi(&decoded, 1234).expect("valid IPv4 record");
         assert_eq!(event.src_ip, IpAddr::V4(Ipv4Addr::new(10, 99, 0, 2)));
         assert_eq!(event.dst_ip, IpAddr::V4(Ipv4Addr::new(10, 99, 0, 1)));
-        assert_eq!(event.protocol, 1);
+        assert_eq!(event.src_port, 0x1234);
+        assert_eq!(event.dst_port, 0x00dd);
+        assert_eq!(event.protocol, 17);
         assert_eq!(event.ts_unix_ms, 1234);
-        // CSV uses Display: dotted quad for IPv4.
         assert_eq!(event.src_ip.to_string(), "10.99.0.2");
     }
 
     #[test]
-    fn decodes_ipv6_from_full_16_bytes() {
+    fn decodes_ipv6_from_the_full_sixteen_bytes() {
         let src: Ipv6Addr = "fd00:99::2".parse().unwrap();
         let dst: Ipv6Addr = "fd00:99::1".parse().unwrap();
         let raw = raw_event(FAMILY_IPV6, src.octets(), dst.octets(), 58);
-        let event = Event::from_abi(&raw, 1).expect("valid v2 IPv6 record");
+        let event = Event::from_abi(&raw, 1).expect("valid IPv6 record");
         assert_eq!(event.src_ip, IpAddr::V6(src));
         assert_eq!(event.dst_ip, IpAddr::V6(dst));
         assert_eq!(event.protocol, 58);
-        // CSV uses Display: RFC 5952 compressed form.
         assert_eq!(event.src_ip.to_string(), "fd00:99::2");
     }
 
+    /// A leftover 48-byte record from the previous ABI must be rejected, not
+    /// decoded with the current (64-byte) layout.
     #[test]
-    fn rejects_unknown_version_and_family() {
-        let mut wrong_version = raw_event(FAMILY_IPV4, [0; 16], [0; 16], 1);
-        wrong_version.version = EVENT_ABI_VERSION + 1;
-        assert!(Event::from_abi(&wrong_version, 0).is_none());
+    fn rejects_the_old_48_byte_record_as_malformed() {
+        let mut old_abi = vec![0u8; 48];
+        // First eight bytes of the old record were `ts_ns`; they are non-zero
+        // so a wrong-layout decode would produce a bogus timestamp.
+        old_abi[..8].copy_from_slice(&u64::MAX.to_ne_bytes());
 
+        assert!(
+            decode_sample(&old_abi).is_none(),
+            "48-byte record must not decode as SampleEvent"
+        );
+
+        // One byte too long is just as malformed.
+        let mut too_long = abi_bytes(&raw_event(FAMILY_IPV4, [0; 16], [0; 16], 1));
+        too_long.push(0);
+        assert!(decode_sample(&too_long).is_none());
+
+        // A truncated record as well.
+        let mut truncated = abi_bytes(&raw_event(FAMILY_IPV4, [0; 16], [0; 16], 1));
+        truncated.pop();
+        assert!(decode_sample(&truncated).is_none());
+    }
+
+    #[test]
+    fn rejects_unknown_address_family() {
         let wrong_family = raw_event(5, [0; 16], [0; 16], 1);
-        assert!(Event::from_abi(&wrong_family, 0).is_none());
+        assert!(
+            Event::from_abi(&wrong_family, 0).is_none(),
+            "family=5 must be malformed"
+        );
+        // Family 0 and 255 are equally unsupported.
+        for family in [0u8, 255] {
+            assert!(Event::from_abi(&raw_event(family, [0; 16], [0; 16], 1), 0).is_none());
+        }
+    }
+
+    #[test]
+    fn sample_sink_writes_the_fixed_seven_columns() {
+        let path = temp_path("probe-samples");
+        let event = Event {
+            ts_unix_ms: 1_700_000_000_000,
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 99, 0, 2)),
+            dst_ip: IpAddr::V4(Ipv4Addr::new(10, 99, 0, 1)),
+            src_port: 0,
+            dst_port: 0,
+            protocol: 1,
+        };
+        {
+            let mut sink = CsvSink::create(&path, "veth0", false).unwrap();
+            sink.write_batch(std::slice::from_ref(&event)).unwrap();
+            sink.flush().unwrap();
+        }
+        let rows = read_lines(&path);
+        remove(&path);
+        assert_eq!(rows.len(), 2, "header + one row: {rows:?}");
+        assert_eq!(
+            rows[0],
+            "ts_unix_ms,iface,src_ip,dst_ip,src_port,dst_port,protocol"
+        );
+        // Ports stay as integers even when they are 0 (ICMP).
+        assert_eq!(rows[1], "1700000000000,veth0,10.99.0.2,10.99.0.1,0,0,1");
+        assert_eq!(rows[1].split(',').count(), 7);
+    }
+
+    #[test]
+    fn aggregate_sink_writes_the_fixed_sixteen_columns() {
+        let path = temp_path("probe-aggregates");
+        let config = ProbeConfig {
+            version: CONFIG_VERSION,
+            window_ns: 10_000_000_000,
+            grace_ns: 2_000_000_000,
+            ipv4_prefix_len: 24,
+            ipv6_prefix_len: 64,
+            default_action: ACTION_PASS,
+            pad: [0; 5],
+        };
+        // Wall clock 1_000_000_000_000 ns at monotonic 0 → window 0 of 10s.
+        let clock = Clock::new(1_000_000_000_000, 0);
+
+        let mut table = AggTable::new();
+        let mut key = AggKey {
+            window_id: 0,
+            rule_id: 7,
+            direction: DIRECTION_INGRESS,
+            family: FAMILY_IPV4,
+            src_prefix: ipv4_bytes(10, 99, 0, 0),
+            dst_addr: ipv4_bytes(10, 99, 0, 1),
+            dst_port: 8080,
+            protocol: 6,
+            action: ACTION_PASS,
+            reason: 0,
+            pad: [0; 5],
+        };
+        key.src_prefix = ipv4_bytes(10, 99, 0, 0);
+        let mut slot = probe_common::AggValue {
+            count: 123,
+            first_seen: 1_000_000_000,
+            last_seen: 9_000_000_000,
+            sample_dropped: 1,
+            degraded: 0,
+            pad: [0; 6],
+        };
+        table.ingest_slot(key, &slot);
+        slot.count = 0;
+        table.ingest_slot(key, &slot); // count=0 slot must not disturb first/last
+
+        let rows = table.take_closed(0);
+        assert_eq!(rows.len(), 1);
+        {
+            let mut sink = AggCsvSink::create(&path, "veth0", false, config, clock).unwrap();
+            sink.write_rows(&rows).unwrap();
+            sink.flush().unwrap();
+        }
+        let lines = read_lines(&path);
+        remove(&path);
+
+        assert_eq!(lines.len(), 2, "header + one row: {lines:?}");
+        assert_eq!(
+            lines[0],
+            "window_start_ms,window_end_ms,iface,direction,src_prefix,dst_addr,dst_port,protocol,action,rule_id,count,first_seen_ms,last_seen_ms,sample_dropped,degraded,window_complete"
+        );
+        let columns: Vec<&str> = lines[1].split(',').collect();
+        assert_eq!(columns.len(), 16, "16 fixed columns: {columns:?}");
+        assert_eq!(columns[0], "1000000", "window_start_ms");
+        assert_eq!(columns[1], "1010000", "window_end_ms");
+        assert_eq!(columns[2], "veth0");
+        assert_eq!(columns[3], "ingress");
+        assert_eq!(columns[4], "10.99.0.0/24");
+        assert_eq!(columns[5], "10.99.0.1");
+        assert_eq!(columns[6], "8080");
+        assert_eq!(columns[7], "6");
+        assert_eq!(columns[8], "pass");
+        assert_eq!(columns[9], "7");
+        assert_eq!(columns[10], "123", "count is summed across slots");
+        assert_eq!(columns[11], "1001000", "first_seen_ms of the nonzero slot");
+        assert_eq!(columns[12], "1009000", "last_seen_ms of the nonzero slot");
+        assert_eq!(columns[13], "1", "sample_dropped");
+        assert_eq!(columns[14], "0", "degraded");
+        assert_eq!(columns[15], "1", "window_complete");
     }
 
     /// Regression test for two probes writing one CSV: one truncating instance
@@ -274,16 +556,7 @@ mod tests {
     /// flushed (it used to seek back to its own offset).
     #[test]
     fn truncating_sink_does_not_clobber_appended_rows() {
-        let path = std::env::temp_dir().join(format!(
-            "probe-csv-append-{}-{}.csv",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = std::fs::remove_file(&path);
-
+        let path = temp_path("probe-csv-append");
         let event = Event {
             ts_unix_ms: 1,
             src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
@@ -297,23 +570,22 @@ mod tests {
             let mut truncating = CsvSink::create(&path, "veth0", false).unwrap();
             let mut appending = CsvSink::create(&path, "veth1", true).unwrap();
 
-            truncating.write_batch(std::slice::from_ref(&event)).unwrap();
+            truncating
+                .write_batch(std::slice::from_ref(&event))
+                .unwrap();
             truncating.flush().unwrap();
             appending.write_batch(std::slice::from_ref(&event)).unwrap();
             appending.flush().unwrap();
             // Without O_APPEND on the truncating sink this write went back to
             // its own offset and overwrote the veth1 row.
-            truncating.write_batch(std::slice::from_ref(&event)).unwrap();
+            truncating
+                .write_batch(std::slice::from_ref(&event))
+                .unwrap();
             truncating.flush().unwrap();
         }
 
-        let rows: Vec<String> = std::fs::read_to_string(&path)
-            .unwrap()
-            .lines()
-            .map(str::to_owned)
-            .collect();
-        let _ = std::fs::remove_file(&path);
-
+        let rows = read_lines(&path);
+        remove(&path);
         assert_eq!(rows.len(), 4, "header + 3 rows: {rows:?}");
         assert_eq!(
             rows.iter().filter(|r| r.starts_with("ts_unix_ms")).count(),
@@ -321,5 +593,28 @@ mod tests {
         );
         assert_eq!(rows.iter().filter(|r| r.contains(",veth0,")).count(), 2);
         assert_eq!(rows.iter().filter(|r| r.contains(",veth1,")).count(), 1);
+    }
+
+    fn temp_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "{name}-{}-{}.csv",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn read_lines(path: &Path) -> Vec<String> {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn remove(path: &Path) {
+        let _ = std::fs::remove_file(path);
     }
 }
