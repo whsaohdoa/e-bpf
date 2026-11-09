@@ -141,8 +141,8 @@ fn panic(_info: &core::panic::PanicInfo) -> ! { loop {} }
 stats: events_received=6 rows_written=6 kernel_dropped=0 malformed=0
 ```
 
-`malformed` 是 `version != EVENT_ABI_VERSION` 或 `family` 非 4/6 而被跳过的记录数；
-正常情况下为 0。
+`malformed` 是无法解码而被跳过的记录数：ringbuf 记录短于 `PacketEvent`、
+`version != EVENT_ABI_VERSION` 或 `family` 非 4/6；正常情况下为 0。
 
 `RUST_LOG=info` 可看到 attach 等控制面日志；数据面完全不依赖 `env_logger`。
 

@@ -10,13 +10,13 @@ use anyhow::{Context as _, Result, bail};
 use aya::{
     Ebpf,
     maps::{MapData, PerCpuArray, RingBuf},
-    programs::{Xdp, XdpMode},
+    programs::{Xdp, XdpMode, xdp::XdpLinkId},
 };
 use clap::Parser;
 #[rustfmt::skip]
 use log::{debug, info, warn};
 use probe_common::PacketEvent;
-use sink::{Event, SinkKind, create_sink};
+use sink::{Event, Sink, SinkKind, create_sink};
 use tokio::{
     signal,
     signal::unix::{SignalKind, signal as unix_signal},
@@ -26,6 +26,19 @@ use tokio::{
 /// Upper bound per periodic drain; keeps the interval responsive when a large
 /// backlog is waiting in the ring buffer.
 const MAX_EVENTS_PER_TICK: usize = 8192;
+
+/// Userspace event counters, reported in one line on exit.
+///
+/// `received` and `written` are currently always equal because the sink accepts
+/// every decoded event.  They stay separate on purpose: a future sink may
+/// reject or coalesce events, and the `stats:` field names are a
+/// machine-readable contract used by `verification/run_e2e*.sh`.
+#[derive(Default)]
+struct Stats {
+    received: u64,
+    written: u64,
+    malformed: u64,
+}
 
 #[derive(Debug, Parser)]
 #[command(about = "Capture IPv4/IPv6 src/dst at XDP ingress and persist them through a pluggable sink")]
@@ -55,21 +68,14 @@ struct Opt {
 async fn main() -> Result<()> {
     let opt = Opt::parse();
 
-    env_logger::init();
+    // Fail fast, before the logger or any eBPF resource is set up: an invalid
+    // flag should be reported on its own, not buried in startup logs.
     if opt.flush_ms == 0 {
         bail!("--flush-ms must be greater than 0");
     }
+    env_logger::init();
 
-    // Bump the memlock rlimit. This is needed for older kernels that don't use the
-    // new memcg based accounting, see https://lwn.net/Articles/837122/
-    let rlim = libc::rlimit {
-        rlim_cur: libc::RLIM_INFINITY,
-        rlim_max: libc::RLIM_INFINITY,
-    };
-    let ret = unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &rlim) };
-    if ret != 0 {
-        debug!("remove limit on locked memory failed, ret is: {ret}");
-    }
+    raise_memlock();
 
     // This will include your eBPF object file as raw bytes at compile-time and load it at
     // runtime. This approach is recommended for most real-world use cases. If you would
@@ -80,10 +86,95 @@ async fn main() -> Result<()> {
         "/probe"
     )))?;
 
-    // The data path uses the `EVENTS` ring buffer, not aya-log. Keep the logger
-    // optional so kernel-side debug output still reaches userspace if some is
-    // ever added.
-    match aya_log::EbpfLogger::init(&mut ebpf) {
+    init_ebpf_logger(&mut ebpf)?;
+    let link_id = attach_xdp(&mut ebpf, &opt.iface)?;
+    // The EVENTS map is consumed by the reader; DROPS is kept to report the
+    // kernel-side loss counter on shutdown.
+    let (mut ring, drops) = take_maps(&mut ebpf)?;
+
+    let clock = WallClock::new()?;
+    let mut sink = create_sink(opt.sink, &opt.out, &opt.iface, opt.append)?;
+    info!(
+        "persisting to {} (append={})",
+        opt.out.display(),
+        opt.append
+    );
+
+    let mut ticker = time::interval(Duration::from_millis(opt.flush_ms));
+    ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+    let ctrl_c = signal::ctrl_c();
+    tokio::pin!(ctrl_c);
+    // Handle SIGTERM as well, so `kill`/container stop still drains and flushes
+    // instead of losing the userspace buffers.
+    let mut sigterm =
+        unix_signal(SignalKind::terminate()).context("install SIGTERM handler")?;
+
+    let mut stats = Stats::default();
+    let mut batch: Vec<Event> = Vec::with_capacity(MAX_EVENTS_PER_TICK);
+
+    info!("Waiting for Ctrl-C...");
+
+    loop {
+        tokio::select! {
+            _ = &mut ctrl_c => {
+                info!("Ctrl-C received, draining ring buffer");
+                break;
+            }
+            _ = sigterm.recv() => {
+                info!("SIGTERM received, draining ring buffer");
+                break;
+            }
+            _ = ticker.tick() => {
+                let n = drain_ring(&mut ring, &clock, &mut batch, &mut stats);
+                if n > 0 {
+                    commit_batch(sink.as_mut(), &mut batch, &mut stats, true)?;
+                }
+            }
+        }
+    }
+
+    // Final drain: whatever the kernel already queued must still reach disk.
+    final_drain(&mut ring, &clock, sink.as_mut(), &mut batch, &mut stats)?;
+    drop(sink);
+
+    let kernel_dropped = shutdown(&mut ebpf, link_id, &drops)?;
+
+    // Machine-readable contract: the e2e scripts grep these exact tokens, so
+    // the line is printed unconditionally on stdout and is not routed through
+    // `log` (its presence must not depend on `RUST_LOG`).
+    let Stats { received, written, malformed } = stats;
+    println!(
+        "stats: events_received={received} rows_written={written} kernel_dropped={kernel_dropped} malformed={malformed}"
+    );
+
+    Ok(())
+}
+
+/// Bump the memlock rlimit. This is needed for older kernels that don't use the
+/// new memcg based accounting, see https://lwn.net/Articles/837122/
+///
+/// Failure is not fatal: newer kernels work without the bump, so it only goes
+/// to the debug log instead of aborting startup.
+fn raise_memlock() {
+    let rlim = libc::rlimit {
+        rlim_cur: libc::RLIM_INFINITY,
+        rlim_max: libc::RLIM_INFINITY,
+    };
+    let ret = unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &rlim) };
+    if ret != 0 {
+        debug!("remove limit on locked memory failed, ret is: {ret}");
+    }
+}
+
+/// Sets up the optional aya-log pipeline and pumps it from the tokio runtime.
+///
+/// The data path uses the `EVENTS` ring buffer, not aya-log. Keep the logger
+/// optional so kernel-side debug output still reaches userspace if some is
+/// ever added; a kernel/program without aya-log support is only a debug event.
+/// Registering the logger with the reactor is the only step whose I/O error
+/// still propagates; a missing kernel logger is just a `debug!` event above.
+fn init_ebpf_logger(ebpf: &mut Ebpf) -> Result<()> {
+    match aya_log::EbpfLogger::init(ebpf) {
         Err(e) => debug!("eBPF logger not initialised: {e}"),
         Ok(logger) => {
             // SAFETY: The logger owns its file descriptor, which stays open and unchanged
@@ -103,93 +194,89 @@ async fn main() -> Result<()> {
             });
         }
     }
+    Ok(())
+}
 
-    let link_id = {
-        let program: &mut Xdp = ebpf
-            .program_mut("probe")
-            .context("eBPF program 'probe' not found")?
-            .try_into()?;
-        program.load().context("load XDP program")?;
-        program.attach(&opt.iface, XdpMode::default()).with_context(
-            || format!("failed to attach XDP program to '{}'", opt.iface),
-        )?
-    };
-    info!(
-        "attached XDP program to '{}' (link id {:?})",
-        opt.iface, link_id
-    );
+/// Loads and attaches the XDP program, returning the link id used on detach.
+///
+/// Both the load error and the attach error carry context naming the program
+/// and the interface involved.
+fn attach_xdp(ebpf: &mut Ebpf, iface: &str) -> Result<XdpLinkId> {
+    let program: &mut Xdp = ebpf
+        .program_mut("probe")
+        .context("eBPF program 'probe' not found")?
+        .try_into()?;
+    program.load().context("load XDP program")?;
+    let link_id = program
+        .attach(iface, XdpMode::default())
+        .with_context(|| format!("failed to attach XDP program to '{iface}'"))?;
+    info!("attached XDP program to '{iface}' (link id {link_id:?})");
+    Ok(link_id)
+}
 
-    // The EVENTS map is consumed by the reader; DROPS is kept to report the
-    // kernel-side loss counter on shutdown.
-    let mut ring: RingBuf<MapData> = RingBuf::try_from(
-        ebpf.take_map("EVENTS").context("map 'EVENTS' not found")?,
+/// Takes the two maps the userspace side owns.
+///
+/// `EVENTS` is consumed by the reader below; `DROPS` is kept to report the
+/// kernel-side loss counter on shutdown.
+fn take_maps(ebpf: &mut Ebpf) -> Result<(RingBuf<MapData>, PerCpuArray<MapData, u64>)> {
+    let ring = RingBuf::try_from(ebpf.take_map("EVENTS").context("map 'EVENTS' not found")?)
+        .context("open ring buffer EVENTS")?;
+    let drops: PerCpuArray<MapData, u64> = PerCpuArray::try_from(
+        ebpf.take_map("DROPS").context("map 'DROPS' not found")?,
     )
-    .context("open ring buffer EVENTS")?;
-    let drops: PerCpuArray<MapData, u64> =
-        PerCpuArray::try_from(ebpf.take_map("DROPS").context("map 'DROPS' not found")?)
-            .context("open per-CPU array DROPS")?;
+    .context("open per-CPU array DROPS")?;
+    Ok((ring, drops))
+}
 
-    let clock = WallClock::new()?;
-    let mut sink = create_sink(opt.sink, &opt.out, &opt.iface, opt.append)?;
-    info!(
-        "persisting to {} (append={})",
-        opt.out.display(),
-        opt.append
-    );
-
-    let mut ticker = time::interval(Duration::from_millis(opt.flush_ms));
-    ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
-    let ctrl_c = signal::ctrl_c();
-    tokio::pin!(ctrl_c);
-    // Handle SIGTERM as well, so `kill`/container stop still drains and flushes
-    // instead of losing the userspace buffers.
-    let mut sigterm =
-        unix_signal(SignalKind::terminate()).context("install SIGTERM handler")?;
-
-    let mut received: u64 = 0;
-    let mut written: u64 = 0;
-    let mut malformed: u64 = 0;
-    let mut batch: Vec<Event> = Vec::with_capacity(MAX_EVENTS_PER_TICK);
-
-    println!("Waiting for Ctrl-C...");
-
-    loop {
-        tokio::select! {
-            _ = &mut ctrl_c => {
-                info!("Ctrl-C received, draining ring buffer");
-                break;
-            }
-            _ = sigterm.recv() => {
-                info!("SIGTERM received, draining ring buffer");
-                break;
-            }
-            _ = ticker.tick() => {
-                let n = drain_ring(&mut ring, &clock, &mut batch, &mut malformed);
-                if n > 0 {
-                    received += n as u64;
-                    sink.write_batch(&batch)?;
-                    written += n as u64;
-                    batch.clear();
-                    sink.flush()?;
-                }
-            }
-        }
+/// Writes the accumulated batch, accounts for it and optionally flushes.
+///
+/// `flush` is `true` on the periodic tick (so rows become visible every
+/// `--flush-ms`) and `false` during the final drain, which only flushes once
+/// after the ring buffer is empty.  Only call this with a non-empty batch.
+fn commit_batch(
+    sink: &mut dyn Sink,
+    batch: &mut Vec<Event>,
+    stats: &mut Stats,
+    flush: bool,
+) -> Result<()> {
+    let n = batch.len() as u64;
+    sink.write_batch(batch)?;
+    // `received` is kept for a future sink that may drop events; today the sink
+    // accepts everything, so it stays equal to `written`.
+    stats.received += n;
+    stats.written += n;
+    batch.clear();
+    if flush {
+        sink.flush()?;
     }
+    Ok(())
+}
 
-    // Final drain: whatever the kernel already queued must still reach disk.
+/// Drains whatever the kernel already queued on shutdown, then flushes once.
+fn final_drain(
+    ring: &mut RingBuf<MapData>,
+    clock: &WallClock,
+    sink: &mut dyn Sink,
+    batch: &mut Vec<Event>,
+    stats: &mut Stats,
+) -> Result<()> {
     loop {
-        let n = drain_ring(&mut ring, &clock, &mut batch, &mut malformed);
+        let n = drain_ring(ring, clock, batch, stats);
         if n == 0 {
             break;
         }
-        received += n as u64;
-        sink.write_batch(&batch)?;
-        written += n as u64;
-        batch.clear();
+        commit_batch(sink, batch, stats, false)?;
     }
-    sink.flush()?;
-    drop(sink);
+    sink.flush()
+}
 
+/// Reads the kernel drop counter, then detaches the XDP program.
+///
+/// DROPS is read first so the counter is reported even if detaching fails, and
+/// so the teardown order stays "drain -> write -> flush -> read DROPS ->
+/// detach".  Map-read and detach failures are only warnings: there is nothing
+/// left to save, and the process is about to exit anyway.
+fn shutdown(ebpf: &mut Ebpf, link_id: XdpLinkId, drops: &PerCpuArray<MapData, u64>) -> Result<u64> {
     let kernel_dropped: u64 = match drops.get(&0, 0) {
         Ok(values) => values.iter().copied().sum(),
         Err(e) => {
@@ -205,25 +292,22 @@ async fn main() -> Result<()> {
         }
     }
 
-    println!(
-        "stats: events_received={received} rows_written={written} kernel_dropped={kernel_dropped} malformed={malformed}"
-    );
-
-    Ok(())
+    Ok(kernel_dropped)
 }
 
 /// Drains events currently available in the ring buffer into `batch`.
 ///
 /// Returns the number of decoded events.  Each event is copied out of the ring
 /// buffer with `read_unaligned`; `RingBufItem` is dropped immediately after,
-/// which releases the record back to the kernel.  Records whose ABI version or
-/// address family is unknown are skipped and counted in `malformed`; they are
-/// never interpreted with the wrong layout.
+/// which releases the record back to the kernel.  Records that cannot be
+/// decoded at all — too short for the ABI struct, unknown ABI version or
+/// unknown address family — are skipped and counted in `stats.malformed`; they
+/// are never interpreted with the wrong layout.
 fn drain_ring(
     ring: &mut RingBuf<MapData>,
     clock: &WallClock,
     batch: &mut Vec<Event>,
-    malformed: &mut u64,
+    stats: &mut Stats,
 ) -> usize {
     let before = batch.len();
     while batch.len() < MAX_EVENTS_PER_TICK {
@@ -231,10 +315,14 @@ fn drain_ring(
             break;
         };
         if item.len() < mem::size_of::<PacketEvent>() {
+            // Same bucket as a version/family mismatch: the record cannot be
+            // decoded into an `Event`, so `malformed` counts it and nothing is
+            // written to the CSV.
             warn!(
                 "ignoring short ring buffer record ({} bytes)",
                 item.len()
             );
+            stats.malformed += 1;
             continue;
         }
 
@@ -243,7 +331,7 @@ fn drain_ring(
         let raw = unsafe { std::ptr::read_unaligned(item.as_ptr().cast::<PacketEvent>()) };
         match Event::from_abi(&raw, clock.unix_ms(raw.ts_ns)) {
             Some(event) => batch.push(event),
-            None => *malformed += 1,
+            None => stats.malformed += 1,
         }
     }
     batch.len() - before
