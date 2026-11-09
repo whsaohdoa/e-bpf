@@ -120,6 +120,12 @@ struct L3Info {
 /// Returns a pointer to `T` at `offset` from the start of the packet, after
 /// proving to the verifier that all `size_of::<T>()` bytes are within
 /// `[data, data_end)`.
+///
+/// # Safety
+///
+/// The returned pointer is only valid for the duration of this XDP invocation.
+/// Callers must not dereference it after the bounds check above fails, and must
+/// not keep it beyond the packet they are parsing.
 #[inline(always)]
 unsafe fn ptr_at<T>(ctx: &XdpContext, offset: usize) -> Result<*const T, ()> {
     let start = ctx.data();
@@ -139,6 +145,8 @@ unsafe fn ptr_at<T>(ctx: &XdpContext, offset: usize) -> Result<*const T, ()> {
 /// to the stack.
 #[inline(always)]
 fn parse_packet(ctx: &XdpContext) -> Result<L3Info, ()> {
+    // SAFETY: `ptr_at` only returns after checking the full struct is inside
+    // `[data, data_end)`; the pointer is used immediately and not retained.
     let eth = unsafe { ptr_at::<EthHdr>(ctx, 0)? };
     let mut ether_type = u16::from_be(unsafe { (*eth).ether_type });
     let mut l3_offset = ETH_HDR_LEN;
@@ -147,6 +155,8 @@ fn parse_packet(ctx: &XdpContext) -> Result<L3Info, ()> {
         if ether_type != ETH_P_8021Q && ether_type != ETH_P_8021AD {
             break;
         }
+        // SAFETY: same contract as `eth` above: `ptr_at` proved the tag is in
+        // bounds and the pointer is consumed immediately.
         let vlan = unsafe { ptr_at::<VlanHdr>(ctx, l3_offset)? };
         ether_type = u16::from_be(unsafe { (*vlan).encap_proto });
         l3_offset += VLAN_HDR_LEN;
@@ -166,6 +176,8 @@ fn parse_l4_ports(ctx: &XdpContext, l4_offset: usize, protocol: u8) -> (u16, u16
     if protocol != IPPROTO_TCP && protocol != IPPROTO_UDP {
         return (0, 0);
     }
+    // SAFETY: `ptr_at` returns Ok only when the four port bytes are inside the
+    // packet; on Err the pointer is never formed and `(0, 0)` is returned.
     match unsafe { ptr_at::<L4Ports>(ctx, l4_offset) } {
         Ok(ports) => unsafe { ((*ports).src, (*ports).dst) },
         Err(()) => (0, 0),
@@ -175,6 +187,8 @@ fn parse_l4_ports(ctx: &XdpContext, l4_offset: usize, protocol: u8) -> (u16, u16
 /// Parses the fixed IPv4 header at `l3_offset`.
 #[inline(always)]
 fn parse_ipv4(ctx: &XdpContext, l3_offset: usize) -> Result<L3Info, ()> {
+    // SAFETY: `ptr_at` proved the fixed 20-byte header is inside the packet;
+    // every field read below stays within that proved range.
     let ip = unsafe { ptr_at::<Ipv4Hdr>(ctx, l3_offset)? };
     let version_ihl = unsafe { (*ip).version_ihl };
     if version_ihl >> 4 != 4 {
@@ -235,8 +249,9 @@ fn parse_ipv4(ctx: &XdpContext, l3_offset: usize) -> Result<L3Info, ()> {
 /// protocol.  Ports are only parsed when that next-header value is TCP/UDP.
 #[inline(always)]
 fn parse_ipv6(ctx: &XdpContext, l3_offset: usize) -> Result<L3Info, ()> {
-    // Proves `[l3_offset, l3_offset + 40)` is inside `[data, data_end)`;
-    // truncated packets fall through to `Err(())` and are passed up.
+    // SAFETY: proves `[l3_offset, l3_offset + 40)` is inside
+    // `[data, data_end)`; truncated packets fall through to `Err(())` and are
+    // passed up, and every field read below is within those 40 bytes.
     let ip = unsafe { ptr_at::<Ipv6Hdr>(ctx, l3_offset)? };
 
     // The version is the high nibble of the first header byte; read it

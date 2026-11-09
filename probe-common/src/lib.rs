@@ -225,6 +225,10 @@ impl AggKey {
 /// `aya::Pod` promises that the type is plain old data and can be copied from
 /// map memory as-is.  Only implemented for the userspace build where `aya` is
 /// available; the eBPF side uses the same definitions by construction.
+// SAFETY: the four types are `#[repr(C)]`, `Copy`, pointer-free and contain
+// only integer/byte-array fields, so any bit pattern is a valid value and a
+// byte copy from map memory is a valid `T`.  Layout is locked by the tests
+// below; the same definitions are used by the eBPF side.
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for SampleEvent {}
 #[cfg(feature = "user")]
