@@ -12,26 +12,28 @@
 //! ```
 //!
 //! `src_port`/`dst_port` are emitted as empty fields in this revision (L4 is
-//! not parsed yet); `protocol` is already the real IPv4 protocol number.  The
-//! columns are present from day one so enabling L4 later does not change the
-//! CSV schema.
+//! not parsed yet); `protocol` is already the real IPv4 protocol number or the
+//! IPv6 base-header Next Header.  Addresses are formatted with `Display`, so
+//! IPv6 rows use the standard compressed form (`fd00:99::2`).  The columns are
+//! present from day one so enabling L4 later does not change the CSV schema.
 
 use std::{
     fs::{File, OpenOptions},
     io::{BufWriter, Write},
-    net::Ipv4Addr,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
     path::Path,
 };
 
 use anyhow::{Context as _, Result};
 use clap::ValueEnum;
+use probe_common::{EVENT_ABI_VERSION, FAMILY_IPV4, FAMILY_IPV6, PacketEvent};
 
 /// A decoded event, independent of the ring buffer ABI.
 #[derive(Clone, Copy, Debug)]
 pub struct Event {
     pub ts_unix_ms: u64,
-    pub src_ip: Ipv4Addr,
-    pub dst_ip: Ipv4Addr,
+    pub src_ip: IpAddr,
+    pub dst_ip: IpAddr,
     pub src_port: u16,
     pub dst_port: u16,
     pub protocol: u8,
@@ -40,18 +42,45 @@ pub struct Event {
 impl Event {
     /// Converts one ring buffer record into a userspace event.
     ///
-    /// Addresses/ports are stored in network byte order by the eBPF side, so
-    /// they are converted exactly once here (`from_be`).  Doing it in the
-    /// kernel as well would reverse every address.
-    pub fn from_abi(raw: &probe_common::PacketEvent, ts_unix_ms: u64) -> Self {
-        Self {
+    /// Returns `None` when the record is not a v2 record with a known address
+    /// family; the caller counts those as malformed instead of interpreting
+    /// them with the wrong layout.  Addresses are stored as raw network-order
+    /// bytes by the eBPF side, so no byte swapping happens here.
+    pub fn from_abi(raw: &PacketEvent, ts_unix_ms: u64) -> Option<Self> {
+        if raw.version != EVENT_ABI_VERSION {
+            return None;
+        }
+
+        let (src_ip, dst_ip) = match raw.family {
+            FAMILY_IPV4 => (
+                IpAddr::V4(Ipv4Addr::new(
+                    raw.src_addr[0],
+                    raw.src_addr[1],
+                    raw.src_addr[2],
+                    raw.src_addr[3],
+                )),
+                IpAddr::V4(Ipv4Addr::new(
+                    raw.dst_addr[0],
+                    raw.dst_addr[1],
+                    raw.dst_addr[2],
+                    raw.dst_addr[3],
+                )),
+            ),
+            FAMILY_IPV6 => (
+                IpAddr::V6(Ipv6Addr::from(raw.src_addr)),
+                IpAddr::V6(Ipv6Addr::from(raw.dst_addr)),
+            ),
+            _ => return None,
+        };
+
+        Some(Self {
             ts_unix_ms,
-            src_ip: Ipv4Addr::from(u32::from_be(raw.src_ip)),
-            dst_ip: Ipv4Addr::from(u32::from_be(raw.dst_ip)),
+            src_ip,
+            dst_ip,
             src_port: u16::from_be(raw.src_port),
             dst_port: u16::from_be(raw.dst_port),
             protocol: raw.protocol,
-        }
+        })
     }
 }
 
@@ -102,24 +131,27 @@ impl CsvSink {
                 .with_context(|| format!("create output directory {}", parent.display()))?;
         }
 
-        let mut options = OpenOptions::new();
-        options.create(true).write(true);
-        if append {
-            options.append(true);
-        } else {
-            options.truncate(true);
-        }
-        let file = options
+        // Always append: two probes may write the same CSV concurrently (one per
+        // veth end, as in verification/run_e2e_ipv6.sh).  Without O_APPEND a
+        // truncating writer keeps its own file offset and would silently
+        // overwrite rows appended by the other process.  `OpenOptions` rejects
+        // `truncate + append`, so the non-append case truncates explicitly.
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .append(true)
             .open(path)
             .with_context(|| format!("open output file {}", path.display()))?;
-        let write_header = if append {
-            file.metadata()
-                .with_context(|| format!("stat output file {}", path.display()))?
-                .len()
-                == 0
-        } else {
-            true
-        };
+        if !append {
+            // Fresh run: empty the file once; writes then append from row 0.
+            file.set_len(0)
+                .with_context(|| format!("truncate output file {}", path.display()))?;
+        }
+        let write_header = file
+            .metadata()
+            .with_context(|| format!("stat output file {}", path.display()))?
+            .len()
+            == 0;
 
         let mut writer = BufWriter::new(file);
         if write_header {
@@ -169,5 +201,125 @@ impl Drop for CsvSink {
         // Best effort: the explicit flush on the normal exit path has already
         // run, but Drop covers early returns and panics.
         let _ = self.writer.flush();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn raw_event(family: u8, src: [u8; 16], dst: [u8; 16], protocol: u8) -> PacketEvent {
+        PacketEvent {
+            ts_ns: 1,
+            src_addr: src,
+            dst_addr: dst,
+            src_port: 0,
+            dst_port: 0,
+            protocol,
+            family,
+            version: EVENT_ABI_VERSION,
+            reserved: 0,
+        }
+    }
+
+    fn ipv4_bytes(a: u8, b: u8, c: u8, d: u8) -> [u8; 16] {
+        let mut addr = [0u8; 16];
+        addr[..4].copy_from_slice(&[a, b, c, d]);
+        addr
+    }
+
+    #[test]
+    fn decodes_ipv4_from_left_aligned_bytes() {
+        let raw = raw_event(
+            FAMILY_IPV4,
+            ipv4_bytes(10, 99, 0, 2),
+            ipv4_bytes(10, 99, 0, 1),
+            1,
+        );
+        let event = Event::from_abi(&raw, 1234).expect("valid v2 IPv4 record");
+        assert_eq!(event.src_ip, IpAddr::V4(Ipv4Addr::new(10, 99, 0, 2)));
+        assert_eq!(event.dst_ip, IpAddr::V4(Ipv4Addr::new(10, 99, 0, 1)));
+        assert_eq!(event.protocol, 1);
+        assert_eq!(event.ts_unix_ms, 1234);
+        // CSV uses Display: dotted quad for IPv4.
+        assert_eq!(event.src_ip.to_string(), "10.99.0.2");
+    }
+
+    #[test]
+    fn decodes_ipv6_from_full_16_bytes() {
+        let src: Ipv6Addr = "fd00:99::2".parse().unwrap();
+        let dst: Ipv6Addr = "fd00:99::1".parse().unwrap();
+        let raw = raw_event(FAMILY_IPV6, src.octets(), dst.octets(), 58);
+        let event = Event::from_abi(&raw, 1).expect("valid v2 IPv6 record");
+        assert_eq!(event.src_ip, IpAddr::V6(src));
+        assert_eq!(event.dst_ip, IpAddr::V6(dst));
+        assert_eq!(event.protocol, 58);
+        // CSV uses Display: RFC 5952 compressed form.
+        assert_eq!(event.src_ip.to_string(), "fd00:99::2");
+    }
+
+    #[test]
+    fn rejects_unknown_version_and_family() {
+        let mut wrong_version = raw_event(FAMILY_IPV4, [0; 16], [0; 16], 1);
+        wrong_version.version = EVENT_ABI_VERSION + 1;
+        assert!(Event::from_abi(&wrong_version, 0).is_none());
+
+        let wrong_family = raw_event(5, [0; 16], [0; 16], 1);
+        assert!(Event::from_abi(&wrong_family, 0).is_none());
+    }
+
+    /// Regression test for two probes writing one CSV: one truncating instance
+    /// plus one `--append` instance, as done by verification/run_e2e_ipv6.sh.
+    /// The truncating writer must not clobber rows the appending writer already
+    /// flushed (it used to seek back to its own offset).
+    #[test]
+    fn truncating_sink_does_not_clobber_appended_rows() {
+        let path = std::env::temp_dir().join(format!(
+            "probe-csv-append-{}-{}.csv",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        let event = Event {
+            ts_unix_ms: 1,
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            src_port: 0,
+            dst_port: 0,
+            protocol: 1,
+        };
+
+        {
+            let mut truncating = CsvSink::create(&path, "veth0", false).unwrap();
+            let mut appending = CsvSink::create(&path, "veth1", true).unwrap();
+
+            truncating.write_batch(std::slice::from_ref(&event)).unwrap();
+            truncating.flush().unwrap();
+            appending.write_batch(std::slice::from_ref(&event)).unwrap();
+            appending.flush().unwrap();
+            // Without O_APPEND on the truncating sink this write went back to
+            // its own offset and overwrote the veth1 row.
+            truncating.write_batch(std::slice::from_ref(&event)).unwrap();
+            truncating.flush().unwrap();
+        }
+
+        let rows: Vec<String> = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(rows.len(), 4, "header + 3 rows: {rows:?}");
+        assert_eq!(
+            rows.iter().filter(|r| r.starts_with("ts_unix_ms")).count(),
+            1
+        );
+        assert_eq!(rows.iter().filter(|r| r.contains(",veth0,")).count(), 2);
+        assert_eq!(rows.iter().filter(|r| r.contains(",veth1,")).count(), 1);
     }
 }

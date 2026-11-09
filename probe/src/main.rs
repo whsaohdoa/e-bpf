@@ -28,7 +28,7 @@ use tokio::{
 const MAX_EVENTS_PER_TICK: usize = 8192;
 
 #[derive(Debug, Parser)]
-#[command(about = "Capture IPv4 src/dst at XDP ingress and persist them through a pluggable sink")]
+#[command(about = "Capture IPv4/IPv6 src/dst at XDP ingress and persist them through a pluggable sink")]
 struct Opt {
     /// Interface to attach the XDP program to.
     #[clap(short, long, default_value = "lo")]
@@ -148,6 +148,7 @@ async fn main() -> Result<()> {
 
     let mut received: u64 = 0;
     let mut written: u64 = 0;
+    let mut malformed: u64 = 0;
     let mut batch: Vec<Event> = Vec::with_capacity(MAX_EVENTS_PER_TICK);
 
     println!("Waiting for Ctrl-C...");
@@ -163,7 +164,7 @@ async fn main() -> Result<()> {
                 break;
             }
             _ = ticker.tick() => {
-                let n = drain_ring(&mut ring, &clock, &mut batch);
+                let n = drain_ring(&mut ring, &clock, &mut batch, &mut malformed);
                 if n > 0 {
                     received += n as u64;
                     sink.write_batch(&batch)?;
@@ -177,7 +178,7 @@ async fn main() -> Result<()> {
 
     // Final drain: whatever the kernel already queued must still reach disk.
     loop {
-        let n = drain_ring(&mut ring, &clock, &mut batch);
+        let n = drain_ring(&mut ring, &clock, &mut batch, &mut malformed);
         if n == 0 {
             break;
         }
@@ -205,7 +206,7 @@ async fn main() -> Result<()> {
     }
 
     println!(
-        "stats: events_received={received} rows_written={written} kernel_dropped={kernel_dropped}"
+        "stats: events_received={received} rows_written={written} kernel_dropped={kernel_dropped} malformed={malformed}"
     );
 
     Ok(())
@@ -215,8 +216,15 @@ async fn main() -> Result<()> {
 ///
 /// Returns the number of decoded events.  Each event is copied out of the ring
 /// buffer with `read_unaligned`; `RingBufItem` is dropped immediately after,
-/// which releases the record back to the kernel.
-fn drain_ring(ring: &mut RingBuf<MapData>, clock: &WallClock, batch: &mut Vec<Event>) -> usize {
+/// which releases the record back to the kernel.  Records whose ABI version or
+/// address family is unknown are skipped and counted in `malformed`; they are
+/// never interpreted with the wrong layout.
+fn drain_ring(
+    ring: &mut RingBuf<MapData>,
+    clock: &WallClock,
+    batch: &mut Vec<Event>,
+    malformed: &mut u64,
+) -> usize {
     let before = batch.len();
     while batch.len() < MAX_EVENTS_PER_TICK {
         let Some(item) = ring.next() else {
@@ -233,7 +241,10 @@ fn drain_ring(ring: &mut RingBuf<MapData>, clock: &WallClock, batch: &mut Vec<Ev
         // SAFETY: length was checked above; `read_unaligned` does not require
         // the ring buffer pointer to be aligned to 8 bytes.
         let raw = unsafe { std::ptr::read_unaligned(item.as_ptr().cast::<PacketEvent>()) };
-        batch.push(Event::from_abi(&raw, clock.unix_ms(raw.ts_ns)));
+        match Event::from_abi(&raw, clock.unix_ms(raw.ts_ns)) {
+            Some(event) => batch.push(event),
+            None => *malformed += 1,
+        }
     }
     batch.len() - before
 }
