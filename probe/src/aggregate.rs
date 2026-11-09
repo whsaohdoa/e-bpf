@@ -374,9 +374,21 @@ impl Clock {
     }
 
     /// Wall-clock Unix milliseconds for a monotonic timestamp.
+    ///
+    /// Timestamps *before* the sampled monotonic instant are valid: the window
+    /// that contains the probe's first packet may have started a few seconds
+    /// before the process did.  Subtracting that delta is what makes
+    /// `window_start_ms` a real wall-clock boundary instead of clamping it to
+    /// the startup time.  Only a timestamp before the Unix epoch itself is
+    /// clamped to 0.
     pub fn unix_ms(&self, mono_ts_ns: u64) -> u64 {
-        let delta = mono_ts_ns.saturating_sub(self.mono_ns) as u128;
-        ((self.unix_ns + delta) / 1_000_000).min(u64::MAX as u128) as u64
+        let ns = if mono_ts_ns >= self.mono_ns {
+            self.unix_ns + u128::from(mono_ts_ns - self.mono_ns)
+        } else {
+            self.unix_ns
+                .saturating_sub(u128::from(self.mono_ns - mono_ts_ns))
+        };
+        (ns / 1_000_000).min(u64::MAX as u128) as u64
     }
 
     /// Wall-clock start of `window_id` in Unix milliseconds.
@@ -773,9 +785,13 @@ mod tests {
         let clock = Clock::new(1_000_000_000, 500);
         assert_eq!(clock.unix_ms(500), 1_000);
         assert_eq!(clock.unix_ms(1_000_500), 1_001);
-        // Timestamps before the sampled monotonic instant are clamped to the
-        // sampled wall clock instead of underflowing.
-        assert_eq!(clock.unix_ms(0), 1_000);
+        // Timestamps before the sampled monotonic instant keep their exact
+        // negative offset: a window that started before the probe did must not
+        // be clamped to the startup wall clock.
+        assert_eq!(clock.unix_ms(0), 999);
+        let old_window = Clock::new(10_000_000, 5_000_000);
+        assert_eq!(old_window.window_start_ms(0, 1_000_000), 5);
+        assert_eq!(old_window.window_end_ms(0, 1_000_000), 6);
 
         // Window bounds use the same offset; a clock sampled on a window
         // boundary keeps the arithmetic exact.
