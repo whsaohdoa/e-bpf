@@ -1,0 +1,224 @@
+# syntax=docker/dockerfile:1
+# check=skip=SecretsUsedInArgOrEnv
+#
+# LLVM_GPG_KEY_URL is the URL of a *public* signing key, not a secret; the
+# SecretsUsedInArgOrEnv check flags it on the name alone (hence the skip above).
+#
+# CI/CD image for the probe: builds the workspace and ships ONLY the compiled
+# artifact. There is no development environment in the final image — no
+# toolchain, no editor helpers, no bpftool/iproute2/sudo, no bind-mounted
+# sources. The runtime image contains one file, /usr/local/bin/probe.
+#
+# The eBPF object is not a separate artifact: probe/build.rs compiles
+# probe-ebpf with aya-build and probe/src/main.rs embeds the result via
+# include_bytes_aligned!(concat!(env!("OUT_DIR"), "/probe")), so the userspace
+# binary is the complete deliverable.
+#
+# Build the runnable image:
+#   docker build -f Dockerfile.ci -t probe:ci .
+#
+# Export the raw binary for a CI artifact store (no image is kept):
+#   docker build -f Dockerfile.ci --target artifacts \
+#       --output type=local,dest=./dist .
+#
+# Verify the binary runs on RUNTIME_BASE (catches glibc mismatches without
+# needing BPF privileges):
+#   docker build -f Dockerfile.ci --target check .
+#
+# Run it (XDP needs BPF/NET_ADMIN; the binary defaults to --iface lo and writes
+# /workspace/packets.csv + /workspace/aggregates.csv):
+#   docker run --rm --privileged --network host -v "$PWD/out:/workspace" probe:ci
+#
+# Machine-specific mirrors are build args with upstream defaults, matching
+# Dockerfile / .env.template. A .env is NOT present in a CI checkout (it is
+# git-ignored), so pass the mirrors explicitly there, for example:
+#   docker build -f Dockerfile.ci \
+#     --build-arg UBUNTU_BOOTSTRAP_MIRROR=http://mirrors.tuna.tsinghua.edu.cn/ubuntu \
+#     --build-arg UBUNTU_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/ubuntu \
+#     --build-arg LLVM_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/llvm-apt \
+#     --build-arg RUSTUP_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/rustup \
+#     --build-arg CARGO_REGISTRY_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/ \
+#     -t probe:ci .
+
+ARG BASE_IMAGE=ubuntu:24.04
+
+# Base for the final image. It only has to supply a libc at least as new as
+# BASE_IMAGE's, because the binary is dynamically linked against that glibc.
+ARG RUNTIME_BASE=ubuntu:24.04
+
+# ---------------------------------------------------------------------------
+# Stage 1: toolchain. Everything needed to compile the workspace and nothing
+# else: LLVM (bpf-linker links against it), a Rust channel pair (stable for the
+# userspace crate, nightly + rust-src for the eBPF crate's -Z build-std=core),
+# and bpf-linker itself. No cargo-generate, no sudo, no kernel inspection tools.
+#
+# This stage is identical in intent to the Dockerfile's toolchain layers, so a
+# rebuild after a code change reuses it from the layer cache.
+# ---------------------------------------------------------------------------
+FROM ${BASE_IMAGE} AS toolchain
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+ARG DEBIAN_FRONTEND=noninteractive
+
+# Same mirror knobs and defaults as Dockerfile; see .env.template for the
+# China-mirror set. Do not append a trailing slash.
+ARG UBUNTU_BOOTSTRAP_MIRROR=http://archive.ubuntu.com/ubuntu
+ARG UBUNTU_MIRROR=https://archive.ubuntu.com/ubuntu
+ARG LLVM_MIRROR=https://apt.llvm.org
+ARG LLVM_GPG_KEY_URL=https://apt.llvm.org/llvm-snapshot.gpg.key
+ARG RUSTUP_MIRROR=https://static.rust-lang.org
+
+# Optional crates.io replacement (sparse index URL). Empty means upstream
+# crates.io is used. Example: https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/
+ARG CARGO_REGISTRY_MIRROR=
+
+# Toolchain versions. LLVM_VERSION drives both the apt packages and the
+# bpf-linker cargo feature, so they cannot drift. Pin RUST_VERSION and
+# RUST_NIGHTLY to exact releases in CI if reproducible rebuilds are required.
+ARG LLVM_VERSION=23
+ARG RUST_VERSION=stable
+ARG RUST_NIGHTLY=nightly
+ARG BPF_LINKER_VERSION=0.12.0
+
+ENV LLVM_PREFIX=/usr/lib/llvm-${LLVM_VERSION}
+ENV PATH="/usr/local/cargo/bin:${LLVM_PREFIX}/bin:${PATH}"
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    RUSTUP_DIST_SERVER=${RUSTUP_MIRROR} \
+    RUSTUP_UPDATE_ROOT=${RUSTUP_MIRROR}/rustup
+
+# apt is bootstrapped over HTTP (the minimal image may not trust HTTPS yet),
+# then switched to the HTTPS mirror. Only what the build needs is installed:
+# a C toolchain for crates with native build scripts, and the LLVM development
+# packages bpf-linker must link against. apt lists are dropped in this layer.
+RUN printf '%s\n' \
+        'Types: deb' \
+        "URIs: ${UBUNTU_BOOTSTRAP_MIRROR}" \
+        'Suites: noble noble-updates noble-backports noble-security' \
+        'Components: main restricted universe multiverse' \
+        'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' \
+        > /etc/apt/sources.list.d/ubuntu.sources \
+    && rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        gnupg \
+    && sed -i "s|^URIs: .*|URIs: ${UBUNTU_MIRROR}|" \
+        /etc/apt/sources.list.d/ubuntu.sources \
+    && install -d -m 0755 /etc/apt/keyrings \
+    && curl -fsSL "${LLVM_GPG_KEY_URL}" \
+        | gpg --dearmor --yes -o /etc/apt/keyrings/llvm.gpg \
+    && . /etc/os-release \
+    && echo "deb [signed-by=/etc/apt/keyrings/llvm.gpg] ${LLVM_MIRROR}/${VERSION_CODENAME}/ llvm-toolchain-${VERSION_CODENAME}-${LLVM_VERSION} main" \
+        > /etc/apt/sources.list.d/llvm.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        pkg-config \
+        clang-${LLVM_VERSION} \
+        llvm-${LLVM_VERSION} \
+        llvm-${LLVM_VERSION}-dev \
+        libclang-${LLVM_VERSION}-dev \
+        libpolly-${LLVM_VERSION}-dev \
+        libzstd-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# rustup-init is architecture-specific; the image stays usable on amd64 and
+# arm64 CI runners.
+RUN case "$(dpkg --print-architecture)" in \
+        amd64) RUSTUP_HOST=x86_64-unknown-linux-gnu ;; \
+        arm64) RUSTUP_HOST=aarch64-unknown-linux-gnu ;; \
+        *) echo "Unsupported architecture: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac \
+    && curl --proto '=https' --tlsv1.2 -fsSL \
+        --retry 5 --retry-all-errors --retry-delay 2 \
+        "${RUSTUP_DIST_SERVER}/rustup/dist/${RUSTUP_HOST}/rustup-init" \
+        -o /tmp/rustup-init \
+    && chmod +x /tmp/rustup-init \
+    && /tmp/rustup-init -y --no-modify-path --profile minimal \
+        --default-toolchain "${RUST_VERSION}" \
+    && rustup toolchain install "${RUST_NIGHTLY}" --profile minimal --component rust-src \
+    && rustup default "${RUST_VERSION}" \
+    && rm -f /tmp/rustup-init
+
+# Optional crates.io mirror, written before anything is fetched from the
+# registry so it applies to both bpf-linker and the workspace build.
+RUN if [ -n "${CARGO_REGISTRY_MIRROR}" ]; then \
+        install -d -m 0755 "${CARGO_HOME}" \
+        && printf '%s\n' \
+            '[source.crates-io]' \
+            'replace-with = "mirror"' \
+            '[source.mirror]' \
+            "registry = \"sparse+${CARGO_REGISTRY_MIRROR}\"" \
+            > "${CARGO_HOME}/config.toml"; \
+    fi
+
+# bpf-linker is built once here and reused by every build of the workspace.
+# --no-default-features plus the explicit llvm feature keeps it on the same
+# LLVM as the apt packages above.
+RUN cargo install bpf-linker \
+        --version "${BPF_LINKER_VERSION}" \
+        --locked \
+        --no-default-features \
+        --features "llvm-${LLVM_VERSION}"
+
+# ---------------------------------------------------------------------------
+# Stage 2: builder. Compiles the workspace and leaves the binary in /out.
+#
+# The cargo registry/git caches and the target directory are BuildKit cache
+# mounts, not layers: a CI runner with a warmed cache reuses compiled
+# dependencies, and none of the intermediate objects (including the ~2 GB host
+# target/ directory, which .dockerignore keeps out of the context) end up in the
+# image. The binary is copied out of the cache mount to /out in the same RUN
+# because cache mounts are not visible to later stages.
+# ---------------------------------------------------------------------------
+FROM toolchain AS builder
+
+WORKDIR /src
+COPY . .
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/src/target \
+    cargo build --release --locked --bin probe \
+    && strip --strip-unneeded /src/target/release/probe \
+    && install -D -m 0755 /src/target/release/probe /out/probe
+
+# ---------------------------------------------------------------------------
+# Stage 3: runtime. Only the compiled artifact. RUNTIME_BASE supplies glibc for
+# the dynamically linked binary, so it must be no older than BASE_IMAGE's libc
+# (both default to the same Ubuntu release). No packages are installed here on
+# purpose: the probe is pure Rust with no libbpf/libelf dependency, and the
+# eBPF object is embedded, so nothing else is needed at runtime.
+#
+# The container must be allowed to load BPF programs (--privileged, or
+# --cap-add=BPF --cap-add=NET_ADMIN --cap-add=PERFMON) and it runs as root
+# because XDP attach is privileged work.
+# ---------------------------------------------------------------------------
+FROM ${RUNTIME_BASE} AS runtime
+
+COPY --from=builder /out/probe /usr/local/bin/probe
+
+# Matches the binary's own defaults for --out and --agg-out (/workspace/*.csv),
+# so a bind mount at /workspace captures both CSVs.
+WORKDIR /workspace
+
+# No CMD: the binary's clap defaults (--iface lo, 10 s windows, CSV sink) apply.
+ENTRYPOINT ["/usr/local/bin/probe"]
+
+# ---------------------------------------------------------------------------
+# Stage 4: check. Fails the build if the binary cannot even start on
+# RUNTIME_BASE (for example GLIBC_2.xx not found). --help needs no privileges.
+# ---------------------------------------------------------------------------
+FROM runtime AS check
+
+RUN ["/usr/local/bin/probe", "--help"]
+
+# ---------------------------------------------------------------------------
+# Stage 5: artifacts. Raw binary for a CI artifact store:
+#   docker build -f Dockerfile.ci --target artifacts --output type=local,dest=./dist .
+# ---------------------------------------------------------------------------
+FROM scratch AS artifacts
+
+COPY --from=builder /out/probe /probe

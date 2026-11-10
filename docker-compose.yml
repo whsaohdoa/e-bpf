@@ -1,0 +1,132 @@
+# Development environment for Rust + Aya eBPF on WSL2.
+#
+# Run from this directory (inside WSL2) with:
+#   docker compose up -d
+#   docker compose exec aya-dev bash
+#
+# The relative build context and bind mount both refer to this directory, so
+# the project can be edited on the mounted host filesystem and compiled inside
+# the container without copying sources into the image.
+#
+# Machine-specific settings (host paths, mirrors, image/container names,
+# privilege posture, dev-environment preferences) are NOT hardcoded here. They
+# live in a .env file next to this file, which Compose loads automatically for
+# the ${VAR} substitutions below. Start from the committed template:
+#
+#   cp .env.template .env
+#
+# .env is git-ignored and holds this machine's values; .env.template is the
+# tracked, documented default set.
+
+services:
+  aya-dev:
+    build:
+      context: ${AYA_DEV_BUILD_CONTEXT:-.}
+      dockerfile: ${AYA_DEV_DOCKERFILE:-Dockerfile}
+
+      # Build-time endpoints and network workarounds. These repeat the
+      # Dockerfile's ARG defaults so that deleting a line from .env still
+      # produces a working build; keep the two in sync when changing a default.
+      args:
+        UBUNTU_BOOTSTRAP_MIRROR: ${UBUNTU_BOOTSTRAP_MIRROR:-http://archive.ubuntu.com/ubuntu}
+        UBUNTU_MIRROR: ${UBUNTU_MIRROR:-https://archive.ubuntu.com/ubuntu}
+        LLVM_MIRROR: ${LLVM_MIRROR:-https://apt.llvm.org}
+        LLVM_GPG_KEY_URL: ${LLVM_GPG_KEY_URL:-https://apt.llvm.org/llvm-snapshot.gpg.key}
+        RUSTUP_MIRROR: ${RUSTUP_MIRROR:-https://static.rust-lang.org}
+        GIT_HTTP_VERSION: ${GIT_HTTP_VERSION:-HTTP/1.1}
+
+    # Explicit image name so rebuilds can be identified and tagged.
+    image: ${AYA_DEV_IMAGE:-aya-dev}:${AYA_DEV_IMAGE_TAG:-ubuntu24.04-llvm23}
+    container_name: ${AYA_DEV_CONTAINER_NAME:-aya-dev}
+
+    # eBPF loading needs capabilities that cannot be obtained reliably from the
+    # default Docker capability set. For the first validation stage this uses
+    # privileged mode, which also covers the WSL2 kernel variations in BPF,
+    # BTF, TC and bpftool behaviour.
+    #
+    # Trade-off / smaller-permission alternative: once the program loads
+    # successfully, remove `privileged: true` and use at least:
+    #
+    #   cap_add:
+    #     - BPF
+    #     - NET_ADMIN
+    #     - PERFMON
+    #     - SYS_RESOURCE
+    #
+    # CAP_SYS_ADMIN may additionally be required on kernels older than 5.8 and
+    # for some debugfs/bpftool operations, so it may need to be added when
+    # narrowing permissions. This is intentionally not enabled now because the
+    # goal is a working development environment first.
+    #
+    # Set AYA_DEV_PRIVILEGED=false in .env for a host that must not run
+    # privileged containers.
+    privileged: ${AYA_DEV_PRIVILEGED:-true}
+
+    # Host networking avoids a second network namespace and makes the firewall
+    # under development attach directly to the WSL2 interfaces. This also means
+    # `ports:` must not be used here.
+    #
+    # WSL2 note: with Docker Engine running inside WSL2 this is the WSL2 network
+    # namespace, not the Windows host namespace. With Docker Desktop it is the
+    # Docker Desktop Linux VM's namespace. XDP support also depends on the WSL2
+    # kernel and network driver; if XDP attach fails, TC-BPF is the usual
+    # fallback even though this compose file is still configured correctly.
+    #
+    # Set AYA_DEV_NETWORK_MODE=bridge in .env to opt out on a host where host
+    # networking is unavailable; that requires adding explicit `ports:` below.
+    network_mode: ${AYA_DEV_NETWORK_MODE:-host}
+
+    working_dir: ${AYA_DEV_WORKDIR:-/workspace}
+
+    volumes:
+      # Host project directory <-> container WORKDIR. Keep the repository in the
+      # WSL2 ext4 filesystem (for example ~/src/eBPF) rather than /mnt/d when
+      # possible: bind mounts over the Windows 9p/drvfs bridge are much slower
+      # and have weaker inotify semantics.
+      #
+      # Source is AYA_DEV_WORKSPACE_HOST (default: this directory). Point it at
+      # an absolute path such as ~/src/eBPF on a WSL2 host where the checkout
+      # lives somewhere other than next to this compose file.
+      - ${AYA_DEV_WORKSPACE_HOST:-.}:${AYA_DEV_WORKDIR:-/workspace}
+
+      # debugfs is used by bpftool and by eBPF debugging/inspection. It must be
+      # mounted on the WSL2 host first. WSL2 kernels may expose only part of
+      # debugfs; this mount is still required for the parts that are available.
+      #
+      # AYA_DEV_DEBUGFS_HOST overrides the host side. On a host where debugfs is
+      # not mounted, set it to an existing directory (or comment this entry out)
+      # so the service still starts; bpftool/BTF inspection will then be limited.
+      - ${AYA_DEV_DEBUGFS_HOST:-/sys/kernel/debug}:/sys/kernel/debug:rw
+
+    # Keep the container alive with an interactive bash shell. Without both
+    # stdin_open and tty, `docker compose exec` works but `docker compose run`
+    # and an attached session lose normal terminal behaviour.
+    stdin_open: true
+    tty: true
+    command: ["bash"]
+
+    # Aya reserves BPF maps and program memory against RLIMIT_MEMLOCK on older
+    # kernels. Unlocking the limit avoids "cannot allocate memory" failures
+    # during map creation; newer kernels account BPF memory differently, but
+    # this is harmless and keeps the environment usable across WSL2 kernels.
+    # AYA_DEV_MEMLOCK_SOFT/HARD exist for kernels or container runtimes that
+    # reject a negative (unlimited) value.
+    ulimits:
+      memlock:
+        soft: ${AYA_DEV_MEMLOCK_SOFT:--1}
+        hard: ${AYA_DEV_MEMLOCK_HARD:--1}
+
+    # privileged already disables the default seccomp profile in practice, but
+    # keep this explicit so switching away from privileged mode does not
+    # silently reintroduce seccomp denials for bpf()/perf_event_open().
+    # AYA_DEV_SECCOMP_PROFILE must be "unconfined" or the name of a seccomp
+    # profile the Docker daemon can resolve.
+    security_opt:
+      - seccomp:${AYA_DEV_SECCOMP_PROFILE:-unconfined}
+
+    environment:
+      # Personal dev-environment preferences; override per machine in .env.
+      # Names are AYA_DEV_-prefixed so an unrelated RUST_BACKTRACE or
+      # CARGO_TERM_COLOR in the host shell is not picked up by accident.
+      RUST_BACKTRACE: "${AYA_DEV_RUST_BACKTRACE:-1}"
+      CARGO_TERM_COLOR: "${AYA_DEV_CARGO_TERM_COLOR:-always}"

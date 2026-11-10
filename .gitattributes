@@ -1,0 +1,12 @@
+# Keep Docker tooling inputs at LF line endings.
+#
+# This checkout lives on Windows, where core.autocrlf=true would write CRLF into
+# the working tree on the next checkout. Inside the container the Dockerfile and
+# the .env files are read by Linux tools, and a trailing CR after a "\" line
+# continuation breaks those shell snippets. Pinning eol=lf keeps the bytes the
+# image builds from identical on every platform.
+Dockerfile          text eol=lf
+Dockerfile.ci       text eol=lf
+docker-compose.yml  text eol=lf
+.dockerignore       text eol=lf
+.env.template       text eol=lf

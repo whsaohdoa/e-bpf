@@ -1,0 +1,9 @@
+# Keep the build context small and free of local secrets.
+#
+# The source is bind-mounted at runtime (see docker-compose.yml), so nothing
+# from this directory actually needs to be baked into the image; the context
+# exists only because `docker build` requires one.
+.git
+.gitignore
+target
+.env
