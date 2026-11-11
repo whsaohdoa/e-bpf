@@ -1,8 +1,6 @@
 #![no_std]
 #![no_main]
 
-use core::mem;
-
 use aya_ebpf::{
     bindings::xdp_action,
     helpers::bpf_ktime_get_ns,
@@ -12,26 +10,10 @@ use aya_ebpf::{
 };
 use probe_common::{
     ACTION_PASS, AggKey, AggValue, CONFIG_VERSION, DEFAULT_WINDOW_NS, DIRECTION_INGRESS,
-    FAMILY_IPV4, FAMILY_IPV6, ProbeConfig, STATS_AGG_OVERFLOW, STATS_CONFIG_MISSING,
-    STATS_PACKETS_TOTAL, STATS_SAMPLE_FAILED, SampleEvent, mask_src_prefix,
+    FAMILY_IPV4, ProbeConfig, STATS_AGG_OVERFLOW, STATS_CONFIG_MISSING, STATS_PACKETS_TOTAL,
+    STATS_SAMPLE_FAILED, SampleEvent, mask_src_prefix,
+    parse::{Pkt, parse_ip},
 };
-
-const ETH_HDR_LEN: usize = 14;
-const VLAN_HDR_LEN: usize = 4;
-
-const ETH_P_IP: u16 = 0x0800;
-const ETH_P_IPV6: u16 = 0x86dd;
-const ETH_P_8021Q: u16 = 0x8100;
-const ETH_P_8021AD: u16 = 0x88a8;
-
-const IPV4_MIN_IHL: usize = 5;
-
-/// IPv6 has a fixed 40-byte base header; there is no `ihl` equivalent.
-const IPV6_HDR_LEN: usize = 40;
-
-/// L4 protocol numbers whose first four bytes are the source/destination port.
-const IPPROTO_TCP: u8 = 6;
-const IPPROTO_UDP: u8 = 17;
 
 /// First-packet samples.  Sized as a power-of-two multiple of the page size as
 /// required by the kernel ring buffer.  Samples are tiny (one per key/window
@@ -51,229 +33,28 @@ static AGG: PerCpuHashMap<AggKey, AggValue> = PerCpuHashMap::with_max_entries(13
 #[map]
 static STATS: PerCpuArray<u64> = PerCpuArray::with_max_entries(8, 0);
 
-#[repr(C)]
-struct EthHdr {
-    dst: [u8; 6],
-    src: [u8; 6],
-    ether_type: u16,
-}
-
-#[repr(C)]
-struct VlanHdr {
-    tci: u16,
-    encap_proto: u16,
-}
-
-/// Fixed 20-byte IPv4 header.  Addresses stay `[u8; 4]` so no byte swapping is
-/// involved anywhere on the data path.
-#[repr(C)]
-struct Ipv4Hdr {
-    version_ihl: u8,
-    tos: u8,
-    tot_len: u16,
-    id: u16,
-    frag_off: u16,
-    ttl: u8,
-    protocol: u8,
-    check: u16,
-    saddr: [u8; 4],
-    daddr: [u8; 4],
-}
-
-/// Fixed 40-byte IPv6 base header.
+/// Borrowed view of the XDP packet window.
 ///
-/// The first 32 bits combine version/traffic class/flow label.  They are kept
-/// as bytes so the version nibble can be read from the first byte directly
-/// instead of decoding a `u32`.
-#[repr(C)]
-struct Ipv6Hdr {
-    version_tc_flow: [u8; 4],
-    payload_len: u16,
-    next_header: u8,
-    hop_limit: u8,
-    saddr: [u8; 16],
-    daddr: [u8; 16],
+/// All verifier-visible bounds checking lives in [`Pkt::bytes`]; the parsing
+/// itself is `probe_common::parse`, shared with the L0 host tests.
+struct XdpPkt {
+    data: usize,
+    data_end: usize,
 }
 
-/// First four bytes of a TCP/UDP header, i.e. both ports.  Kept as `u16` bytes
-/// so the data path only ever copies network-order values.
-#[repr(C)]
-struct L4Ports {
-    src: u16,
-    dst: u16,
-}
-
-const _: () = assert!(
-    mem::size_of::<Ipv6Hdr>() == IPV6_HDR_LEN,
-    "IPv6 base header must be exactly 40 bytes"
-);
-
-/// Addresses + protocol + L4 ports of one packet, in the shape of the ABI.
-struct L3Info {
-    src: [u8; 16],
-    dst: [u8; 16],
-    src_port: u16,
-    dst_port: u16,
-    protocol: u8,
-    family: u8,
-}
-
-/// Returns a pointer to `T` at `offset` from the start of the packet, after
-/// proving to the verifier that all `size_of::<T>()` bytes are within
-/// `[data, data_end)`.
-///
-/// # Safety
-///
-/// The returned pointer is only valid for the duration of this XDP invocation.
-/// Callers must not dereference it after the bounds check above fails, and must
-/// not keep it beyond the packet they are parsing.
-#[inline(always)]
-unsafe fn ptr_at<T>(ctx: &XdpContext, offset: usize) -> Result<*const T, ()> {
-    let start = ctx.data();
-    let end = ctx.data_end();
-    let len = mem::size_of::<T>();
-    if start + offset + len > end {
-        return Err(());
-    }
-    Ok((start + offset) as *const T)
-}
-
-/// Parses Ethernet (with up to two stacked 802.1Q/802.1ad tags) and dispatches
-/// on the innermost ethertype: `0x0800` -> IPv4, `0x86DD` -> IPv6.
-///
-/// Returns addresses as raw network-order bytes, left-aligned in 16-byte fields.
-/// Any malformed/unsupported packet is reported as `Err(())` and simply passed
-/// to the stack.
-#[inline(always)]
-fn parse_packet(ctx: &XdpContext) -> Result<L3Info, ()> {
-    // SAFETY: `ptr_at` only returns after checking the full struct is inside
-    // `[data, data_end)`; the pointer is used immediately and not retained.
-    let eth = unsafe { ptr_at::<EthHdr>(ctx, 0)? };
-    let mut ether_type = u16::from_be(unsafe { (*eth).ether_type });
-    let mut l3_offset = ETH_HDR_LEN;
-
-    for _ in 0..2 {
-        if ether_type != ETH_P_8021Q && ether_type != ETH_P_8021AD {
-            break;
+impl Pkt for XdpPkt {
+    #[inline(always)]
+    fn bytes(&self, off: usize, len: usize) -> Option<&[u8]> {
+        let from = self.data.checked_add(off)?;
+        let to = from.checked_add(len)?;
+        if to > self.data_end {
+            return None;
         }
-        // SAFETY: same contract as `eth` above: `ptr_at` proved the tag is in
-        // bounds and the pointer is consumed immediately.
-        let vlan = unsafe { ptr_at::<VlanHdr>(ctx, l3_offset)? };
-        ether_type = u16::from_be(unsafe { (*vlan).encap_proto });
-        l3_offset += VLAN_HDR_LEN;
+        // SAFETY: `[from, to)` was just proven to lie inside the packet window
+        // `[data, data_end)`.  XDP packet bytes are read-only for the duration
+        // of this invocation and the borrow cannot outlive `self`.
+        Some(unsafe { core::slice::from_raw_parts(from as *const u8, len) })
     }
-
-    match ether_type {
-        ETH_P_IP => parse_ipv4(ctx, l3_offset),
-        ETH_P_IPV6 => parse_ipv6(ctx, l3_offset),
-        _ => Err(()),
-    }
-}
-
-/// Parses TCP/UDP ports at `l4_offset`.  Missing/truncated L4 returns `(0, 0)`
-/// instead of dropping the whole packet: the aggregate still counts it.
-#[inline(always)]
-fn parse_l4_ports(ctx: &XdpContext, l4_offset: usize, protocol: u8) -> (u16, u16) {
-    if protocol != IPPROTO_TCP && protocol != IPPROTO_UDP {
-        return (0, 0);
-    }
-    // SAFETY: `ptr_at` returns Ok only when the four port bytes are inside the
-    // packet; on Err the pointer is never formed and `(0, 0)` is returned.
-    match unsafe { ptr_at::<L4Ports>(ctx, l4_offset) } {
-        Ok(ports) => unsafe { ((*ports).src, (*ports).dst) },
-        Err(()) => (0, 0),
-    }
-}
-
-/// Parses the fixed IPv4 header at `l3_offset`.
-#[inline(always)]
-fn parse_ipv4(ctx: &XdpContext, l3_offset: usize) -> Result<L3Info, ()> {
-    // SAFETY: `ptr_at` proved the fixed 20-byte header is inside the packet;
-    // every field read below stays within that proved range.
-    let ip = unsafe { ptr_at::<Ipv4Hdr>(ctx, l3_offset)? };
-    let version_ihl = unsafe { (*ip).version_ihl };
-    if version_ihl >> 4 != 4 {
-        return Err(());
-    }
-
-    let ihl = (version_ihl & 0x0f) as usize;
-    if ihl < IPV4_MIN_IHL {
-        return Err(());
-    }
-
-    // The fixed 20 bytes were checked by `ptr_at`; also make sure IPv4 options
-    // (ihl > 5) are inside the packet before adding `ihl * 4` to the offset.
-    if ctx.data() + l3_offset + ihl * 4 > ctx.data_end() {
-        return Err(());
-    }
-
-    let protocol = unsafe { (*ip).protocol };
-    let src4 = unsafe { (*ip).saddr };
-    let dst4 = unsafe { (*ip).daddr };
-
-    // A non-first fragment has no L4 header; leave the ports 0.  First
-    // fragments (offset 0) still carry the L4 header and are parsed.
-    let frag_off = u16::from_be(unsafe { (*ip).frag_off });
-    let (src_port, dst_port) = if frag_off & 0x1fff != 0 {
-        (0, 0)
-    } else {
-        parse_l4_ports(ctx, l3_offset + ihl * 4, protocol)
-    };
-
-    // Left-align the 4 address bytes and zero the rest of the 16-byte field.
-    // Fixed-length copies only: no slicing, so there is no bounds-check panic
-    // path for the verifier to reason about.
-    let mut src = [0u8; 16];
-    let mut dst = [0u8; 16];
-    // SAFETY: both source arrays are 4 bytes long and both destinations hold 16
-    // bytes, so copying 4 bytes cannot go out of bounds.  The packet bytes are
-    // inside `[data, data_end)` after the `ptr_at` check above.
-    unsafe {
-        core::ptr::copy_nonoverlapping(src4.as_ptr(), src.as_mut_ptr(), 4);
-        core::ptr::copy_nonoverlapping(dst4.as_ptr(), dst.as_mut_ptr(), 4);
-    }
-
-    Ok(L3Info {
-        src,
-        dst,
-        src_port,
-        dst_port,
-        protocol,
-        family: FAMILY_IPV4,
-    })
-}
-
-/// Parses the fixed 40-byte IPv6 base header at `l3_offset`.
-///
-/// Extension headers are deliberately not walked: `protocol` is the Next Header
-/// field of the base header, which may be 0/43/44/51/60 instead of the final L4
-/// protocol.  Ports are only parsed when that next-header value is TCP/UDP.
-#[inline(always)]
-fn parse_ipv6(ctx: &XdpContext, l3_offset: usize) -> Result<L3Info, ()> {
-    // SAFETY: proves `[l3_offset, l3_offset + 40)` is inside
-    // `[data, data_end)`; truncated packets fall through to `Err(())` and are
-    // passed up, and every field read below is within those 40 bytes.
-    let ip = unsafe { ptr_at::<Ipv6Hdr>(ctx, l3_offset)? };
-
-    // The version is the high nibble of the first header byte; read it
-    // directly instead of decoding the version/traffic-class/flow-label word.
-    let first_byte = unsafe { (*ip).version_tc_flow[0] };
-    if first_byte >> 4 != 6 {
-        return Err(());
-    }
-
-    let protocol = unsafe { (*ip).next_header };
-    let (src_port, dst_port) = parse_l4_ports(ctx, l3_offset + IPV6_HDR_LEN, protocol);
-
-    Ok(L3Info {
-        src: unsafe { (*ip).saddr },
-        dst: unsafe { (*ip).daddr },
-        src_port,
-        dst_port,
-        // Base-header Next Header.  Do not walk extension headers.
-        protocol,
-        family: FAMILY_IPV6,
-    })
 }
 
 /// Reads `CONFIG` and applies the safe fallbacks.  No packet is ever dropped
@@ -390,7 +171,12 @@ fn emit_sample(sample: SampleEvent, key: &AggKey) {
 }
 
 fn try_probe(ctx: XdpContext) -> u32 {
-    if let Ok(pkt) = parse_packet(&ctx) {
+    let frame = XdpPkt {
+        data: ctx.data(),
+        data_end: ctx.data_end(),
+    };
+
+    if let Ok(pkt) = parse_ip(&frame) {
         // Exactly one ktime call per packet: the same timestamp is used for the
         // window id and for first/last_seen.
         let ts_ns = unsafe { bpf_ktime_get_ns() };

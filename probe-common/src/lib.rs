@@ -20,6 +20,12 @@
 //! written to `CONFIG`.
 #![no_std]
 
+// `no_std` and the data path never sees this import.
+#[cfg(test)]
+extern crate std;
+
+pub mod parse;
+
 /// [`SampleEvent::family`] value for IPv4 records.
 pub const FAMILY_IPV4: u8 = 4;
 
