@@ -34,13 +34,12 @@ use aya::{
 use clap::Parser;
 #[rustfmt::skip]
 use log::{debug, info, warn};
+use aggregate::{
+    AggRecord, AggTable, Clock, NANOS_PER_MS, SampleDedup, SampleIngest, closed_window_watermark,
+};
 use probe_common::{
     ACTION_PASS, AggKey, AggValue, CONFIG_VERSION, ProbeConfig, STATS_AGG_OVERFLOW,
     STATS_PACKETS_TOTAL, STATS_SAMPLE_FAILED, SampleEvent,
-};
-
-use aggregate::{
-    AggRecord, AggTable, Clock, NANOS_PER_MS, SampleDedup, SampleIngest, closed_window_watermark,
 };
 use sink::{AggSink, Event, Sink, SinkKind, create_agg_sink, create_sink, decode_sample};
 use tokio::{

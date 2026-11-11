@@ -10,3 +10,7 @@ Dockerfile.ci       text eol=lf
 docker-compose.yml  text eol=lf
 .dockerignore       text eol=lf
 .env.template       text eol=lf
+
+# CI entry points are bash scripts; a CRLF checkout (core.autocrlf=true on the
+# Windows dev machine) makes them fail under Linux with `$'\r': command not found`.
+*.sh text eol=lf

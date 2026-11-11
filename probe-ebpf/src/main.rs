@@ -1,6 +1,8 @@
 #![no_std]
 #![no_main]
 
+use core::mem;
+
 use aya_ebpf::{
     bindings::xdp_action,
     helpers::bpf_ktime_get_ns,
@@ -8,7 +10,6 @@ use aya_ebpf::{
     maps::{Array, PerCpuArray, PerCpuHashMap, RingBuf},
     programs::XdpContext,
 };
-use core::mem;
 use probe_common::{
     ACTION_PASS, AggKey, AggValue, CONFIG_VERSION, DEFAULT_WINDOW_NS, DIRECTION_INGRESS,
     FAMILY_IPV4, FAMILY_IPV6, ProbeConfig, STATS_AGG_OVERFLOW, STATS_CONFIG_MISSING,
