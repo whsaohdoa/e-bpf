@@ -14,7 +14,7 @@
 # Usage: bash scripts/ci/run.sh bash scripts/ci/fmt.sh
 set -euo pipefail
 
-NIGHTLY="${RUST_NIGHTLY:-${CI_RUST_NIGHTLY:-nightly}}"
+NIGHTLY="${RUST_NIGHTLY:-nightly}"
 
 # `nightly` is the alias created by install-toolchain.sh when a dated nightly is
 # pinned, and the real channel when the pin was unavailable, so it is the first

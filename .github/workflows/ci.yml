@@ -1,21 +1,17 @@
 name: probe CI
 
-# GitHub Actions port of the "cargo 测试" stage in .workflow/ci.yml (Gitee Go).
-# The commands are the same ones the Gitee runner executes; only the runner
-# plumbing differs:
-#   * the toolchain comes from scripts/ci/install-toolchain.sh, which clones the
+# Test pipeline for the workspace: fmt, clippy, nextest, doc tests and coverage.
+#   * the toolchain comes from scripts/ci/install-toolchain.sh, which mirrors the
 #     `toolchain` stage of Dockerfile.ci with plain apt/rustup/curl;
 #   * the apt/rustup/cargo caches are restored by actions/cache instead of a warm
 #     self-hosted runner;
-#   * no CI_* mirror variables are set: GitHub-hosted runners reach
+#   * no mirror variables are set: GitHub-hosted runners reach
 #     static.rust-lang.org and github.com directly, so the upstream defaults are
-#     the fastest path here (the Gitee pipeline needs rsproxy/ghfast from
-#     mainland China).
+#     the fastest path.
 on:
-  # main only: the pipeline is a post-merge gate, matching .workflow/ci.yml (Gitee
-  # Go), which also only ran on main/master. Feature branches and pull requests do
-  # not start a run; main is protected so changes land through a pull request.
-  # workflow_dispatch stays for manual re-runs without a new commit.
+  # main only: the pipeline is a post-merge gate. Feature branches and pull
+  # requests do not start a run; main is protected so changes land through a pull
+  # request. workflow_dispatch stays for manual re-runs without a new commit.
   push:
     branches: [main]
   workflow_dispatch:
@@ -33,7 +29,7 @@ env:
   # at azure.archive.ubuntu.com — that host does not resolve on these runners,
   # so `apt-get update` fails and install-toolchain.sh dies fetching
   # build-essential. TUNA serves the noble archive (verified from the runner).
-  CI_UBUNTU_MIRROR: https://mirrors.tuna.tsinghua.edu.cn/ubuntu
+  UBUNTU_MIRROR: https://mirrors.tuna.tsinghua.edu.cn/ubuntu
 
 jobs:
   cargo-test:
