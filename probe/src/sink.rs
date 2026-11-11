@@ -328,9 +328,10 @@ impl Drop for AggCsvSink {
 
 #[cfg(test)]
 mod tests {
+    use probe_common::{ACTION_PASS, AggKey, CONFIG_VERSION, DIRECTION_INGRESS, ProbeConfig};
+
     use super::*;
     use crate::aggregate::{AggTable, Clock};
-    use probe_common::{ACTION_PASS, AggKey, CONFIG_VERSION, DIRECTION_INGRESS, ProbeConfig};
 
     fn raw_event(family: u8, src: [u8; 16], dst: [u8; 16], protocol: u8) -> SampleEvent {
         SampleEvent {

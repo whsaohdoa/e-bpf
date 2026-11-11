@@ -455,8 +455,9 @@ fn ipv4_from(bytes: &[u8; 16]) -> Ipv4Addr {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use probe_common::{ACTION_PASS, CONFIG_VERSION, FAMILY_IPV4, FAMILY_IPV6, SampleEvent};
+
+    use super::*;
 
     const WINDOW_NS: u64 = 10_000_000_000;
     const GRACE_NS: u64 = 2_000_000_000;

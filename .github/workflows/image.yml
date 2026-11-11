@@ -1,0 +1,82 @@
+name: probe 镜像
+
+# GitHub Actions port of the "构建并推送镜像" stage in .workflow/ci.yml.
+#
+# The Gitee stage is manual: it builds Dockerfile.ci's `check` target (runs
+# `probe --help` against RUNTIME_BASE, which catches glibc mismatches) and then
+# pushes the runtime image to a private registry. GitHub has no equivalent
+# registry credentials in this repository, so the push half is intentionally
+# omitted: the image is built and smoke-tested, and the stripped binary is
+# exported as an artifact instead.
+#
+# Triggered by changes to the image inputs on main and by hand (the Gitee stage
+# was manual-only; rebuilding whenever Dockerfile.ci or the toolchain script
+# changes is the cheap part to automate, and source-only changes are covered by
+# ci.yml). main only, like ci.yml.
+#   gh workflow run image.yml --ref main
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - Dockerfile.ci
+      - .dockerignore
+      - scripts/ci/**
+      - .github/workflows/image.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: probe-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image-check:
+    name: 镜像 glibc 冒烟
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      # LLVM dev packages plus bpf-linker's build tree need more room than a
+      # stock runner leaves free; these preinstalled SDKs are not used here.
+      - name: 腾出磁盘空间
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: 构建并冒烟 check 目标
+        env:
+          # Same reason as ci.yml: archive.ubuntu.com does not resolve on these
+          # runners, so Dockerfile.ci must be pointed at a reachable mirror. The
+          # bootstrap URL stays plain HTTP because the base image has no CA store
+          # yet; it is switched to HTTPS right after ca-certificates is installed.
+          UBUNTU_MIRROR: https://mirrors.tuna.tsinghua.edu.cn/ubuntu
+          UBUNTU_BOOTSTRAP_MIRROR: http://mirrors.tuna.tsinghua.edu.cn/ubuntu
+        run: |
+          DOCKER_BUILDKIT=1 docker build --target check -f Dockerfile.ci \
+            --build-arg UBUNTU_BOOTSTRAP_MIRROR \
+            --build-arg UBUNTU_MIRROR \
+            -t probe-check:ci .
+
+      # Same builder stage, but exported instead of baked into an image: this is
+      # the artifact a registry push would have carried.
+      - name: 导出二进制
+        env:
+          UBUNTU_MIRROR: https://mirrors.tuna.tsinghua.edu.cn/ubuntu
+          UBUNTU_BOOTSTRAP_MIRROR: http://mirrors.tuna.tsinghua.edu.cn/ubuntu
+        run: |
+          DOCKER_BUILDKIT=1 docker build -f Dockerfile.ci \
+            --build-arg UBUNTU_BOOTSTRAP_MIRROR \
+            --build-arg UBUNTU_MIRROR \
+            --target artifacts --output type=local,dest=dist .
+
+      - name: 上传二进制
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-linux-amd64
+          path: dist/probe
+          if-no-files-found: error

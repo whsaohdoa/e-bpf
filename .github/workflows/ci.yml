@@ -1,0 +1,95 @@
+name: probe CI
+
+# GitHub Actions port of the "cargo 测试" stage in .workflow/ci.yml (Gitee Go).
+# The commands are the same ones the Gitee runner executes; only the runner
+# plumbing differs:
+#   * the toolchain comes from scripts/ci/install-toolchain.sh, which clones the
+#     `toolchain` stage of Dockerfile.ci with plain apt/rustup/curl;
+#   * the apt/rustup/cargo caches are restored by actions/cache instead of a warm
+#     self-hosted runner;
+#   * no CI_* mirror variables are set: GitHub-hosted runners reach
+#     static.rust-lang.org and github.com directly, so the upstream defaults are
+#     the fastest path here (the Gitee pipeline needs rsproxy/ghfast from
+#     mainland China).
+on:
+  # main only: the pipeline is a post-merge gate, matching .workflow/ci.yml (Gitee
+  # Go), which also only ran on main/master. Feature branches and pull requests do
+  # not start a run; main is protected so changes land through a pull request.
+  # workflow_dispatch stays for manual re-runs without a new commit.
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: probe-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # The runner's apt sources go through /etc/apt/apt-mirrors.txt, which points
+  # at azure.archive.ubuntu.com — that host does not resolve on these runners,
+  # so `apt-get update` fails and install-toolchain.sh dies fetching
+  # build-essential. TUNA serves the noble archive (verified from the runner).
+  CI_UBUNTU_MIRROR: https://mirrors.tuna.tsinghua.edu.cn/ubuntu
+
+jobs:
+  cargo-test:
+    name: cargo 测试
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      # ~/.rustup and ~/.cargo/bin carry the rustup toolchains and the
+      # `cargo install`ed tools (nextest, llvm-cov), so a warm cache turns
+      # install-toolchain.sh into a few version checks. target/ keeps the
+      # compiled aya dependency graph.
+      - name: 缓存 rustup / cargo / target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.rustup
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'scripts/ci/install-toolchain.sh') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: 安装工具链
+        run: bash scripts/ci/install-toolchain.sh
+
+      - name: 版本信息
+        run: |
+          bash scripts/ci/run.sh rustc -Vv
+          bash scripts/ci/run.sh bpf-linker --version
+
+      # rustfmt.toml 用了 unstable 选项，必须 nightly rustfmt 才会生效（stable 只会
+      # 打印 warning 并忽略它们）；fmt.sh 负责选工具链并在缺组件时降级。
+      - name: rustfmt
+        run: bash scripts/ci/run.sh bash scripts/ci/fmt.sh
+
+      - name: clippy
+        run: bash scripts/ci/run.sh cargo clippy --all-targets
+
+      - name: 单元测试（nextest）
+        run: bash scripts/ci/run.sh cargo nextest run --no-fail-fast
+
+      - name: 文档测试
+        run: bash scripts/ci/run.sh cargo test --doc
+
+      - name: 覆盖率
+        run: bash scripts/ci/run.sh bash scripts/ci/coverage.sh
+
+      - name: 上传覆盖率报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lcov
+          path: target/lcov.info
+          if-no-files-found: ignore
