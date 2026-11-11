@@ -1,18 +1,13 @@
 name: probe 镜像
 
-# GitHub Actions port of the "构建并推送镜像" stage in .workflow/ci.yml.
+# Image pipeline: builds Dockerfile.ci's `check` target (runs `probe --help`
+# against RUNTIME_BASE, which catches glibc mismatches) and exports the stripped
+# binary. There are no registry credentials in this repository, so the image is
+# built and smoke-tested but not pushed.
 #
-# The Gitee stage is manual: it builds Dockerfile.ci's `check` target (runs
-# `probe --help` against RUNTIME_BASE, which catches glibc mismatches) and then
-# pushes the runtime image to a private registry. GitHub has no equivalent
-# registry credentials in this repository, so the push half is intentionally
-# omitted: the image is built and smoke-tested, and the stripped binary is
-# exported as an artifact instead.
-#
-# Triggered by changes to the image inputs on main and by hand (the Gitee stage
-# was manual-only; rebuilding whenever Dockerfile.ci or the toolchain script
-# changes is the cheap part to automate, and source-only changes are covered by
-# ci.yml). main only, like ci.yml.
+# Triggered by changes to the image inputs on main and by hand: rebuilding
+# whenever Dockerfile.ci or the toolchain script changes is cheap, and
+# source-only changes are covered by ci.yml. main only, like ci.yml.
 #   gh workflow run image.yml --ref main
 on:
   workflow_dispatch:

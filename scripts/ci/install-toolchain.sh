@@ -2,9 +2,9 @@
 # Install everything needed to build and test the probe workspace on a bare
 # runner (one with no Docker).
 #
-# Why this exists: the Gitee Go custom runner has no Docker, so the test stage
-# cannot reuse the `toolchain` stage of Dockerfile.ci. This script installs the
-# same payload with plain apt/rustup/curl:
+# Why this exists: the test job runs on a plain GitHub-hosted runner without
+# Docker, so it cannot reuse the `toolchain` stage of Dockerfile.ci. This script
+# installs the same payload with plain apt/rustup/curl:
 #
 #   rust stable + rust nightly (with rust-src) + bpf-linker + the test tooling
 #   (cargo-nextest, cargo-llvm-cov).
@@ -14,32 +14,26 @@
 # `cargo install` are needed. That is what aya-rs itself does in its CI
 # (`taiki-e/install-action` with `tool: bpf-linker`).
 #
-# GitHub release downloads are frequently unreachable from mainland runners, so
-# the archive comes from one explicitly configured base
-# (BPF_LINKER_DOWNLOAD_BASE, set per pipeline as CI_BPF_LINKER_DOWNLOAD_BASE).
-# There is no built-in proxy list: walking several hosts in a row turned one
-# slow host into a long stall, and the pipeline knows better than the script
-# which mirror is alive. If the download still fails, the script falls back to
-# building bpf-linker from source with LLVM packages from an apt mirror. The fallback
-# costs a `llvm-23` download (~130 MB) plus a few minutes of compiling, but it
-# only runs when the prebuilt path is genuinely impossible.
+# Release downloads are fetched from one explicitly configured base
+# (`BPF_LINKER_DOWNLOAD_BASE`) rather than a built-in proxy list: walking several
+# hosts in a row turned one slow host into a long stall, and the pipeline knows
+# better than the script which mirror is alive. If the download still fails, the
+# script falls back to building bpf-linker from source with LLVM packages from an
+# apt mirror. The fallback costs a `llvm-23` download (~130 MB) plus a few minutes
+# of compiling, but it only runs when the prebuilt path is genuinely impossible.
 #
 # It is idempotent: an image that already ships cc/make/git/curl/zstd skips the
 # apt step altogether (GitHub-hosted runners do), apt no-ops on installed
-# packages, rustup skips installed
-# toolchains, and the bpf-linker / nextest / llvm-cov steps skip once the pinned
-# version is on PATH, so a warm CI cache turns this into a few seconds of
-# version checks.
+# packages, rustup skips installed toolchains, and the bpf-linker / nextest /
+# llvm-cov steps skip once the pinned version is on PATH, so a warm CI cache
+# turns this into a few seconds of version checks.
 #
-# Environment knobs (all optional). Every knob also accepts the `CI_*` spelling
-# used for Gitee Go pipeline variables, e.g. CI_UBUNTU_MIRROR.
+# Environment knobs (all optional):
 #   UBUNTU_MIRROR                rewrite the distro sources to this mirror
 #   RUSTUP_MIRROR                rustup dist server
 #   CARGO_REGISTRY_MIRROR        crates.io mirror (e.g. .../crates.io-index/)
 #   BPF_LINKER_DOWNLOAD_BASE     base URL serving the release archives as
-#                                <base>/v<version>/bpf-linker-<target>.tar.zst,
-#                                e.g. https://ghfast.top/https://github.com/
-#                                aya-rs/bpf-linker/releases/download .
+#                                <base>/v<version>/bpf-linker-<target>.tar.zst .
 #                                Default: GitHub upstream.
 #   BPF_LINKER_VERSION=0.12.0    bpf-linker version to install
 #   BPF_LINKER_SOURCE=0          set to 1 to skip the prebuilt download and
@@ -60,18 +54,17 @@
 # the mirrors and needs apt to work (root, or passwordless sudo).
 set -euo pipefail
 
-# Pipeline variables are spelled CI_*; the unprefixed names are for local use.
-UBUNTU_MIRROR="${UBUNTU_MIRROR:-${CI_UBUNTU_MIRROR:-}}"
-RUSTUP_MIRROR="${RUSTUP_MIRROR:-${CI_RUSTUP_MIRROR:-https://static.rust-lang.org}}"
-CARGO_REGISTRY_MIRROR="${CARGO_REGISTRY_MIRROR:-${CI_CARGO_REGISTRY_MIRROR:-}}"
-BPF_LINKER_DOWNLOAD_BASE="${BPF_LINKER_DOWNLOAD_BASE:-${CI_BPF_LINKER_DOWNLOAD_BASE:-https://github.com/aya-rs/bpf-linker/releases/download}}"
-BPF_LINKER_VERSION="${BPF_LINKER_VERSION:-${CI_BPF_LINKER_VERSION:-0.12.0}}"
-BPF_LINKER_SOURCE="${BPF_LINKER_SOURCE:-${CI_BPF_LINKER_SOURCE:-0}}"
-RUST_VERSION="${RUST_VERSION:-${CI_RUST_VERSION:-stable}}"
-RUST_NIGHTLY="${RUST_NIGHTLY:-${CI_RUST_NIGHTLY:-nightly-2026-11-01}}"
-LLVM_VERSION="${LLVM_VERSION:-${CI_LLVM_VERSION:-23}}"
-LLVM_MIRROR="${LLVM_MIRROR:-${CI_LLVM_MIRROR:-}}"
-LLVM_GPG_KEY_URL="${LLVM_GPG_KEY_URL:-${CI_LLVM_GPG_KEY_URL:-}}"
+UBUNTU_MIRROR="${UBUNTU_MIRROR:-}"
+RUSTUP_MIRROR="${RUSTUP_MIRROR:-https://static.rust-lang.org}"
+CARGO_REGISTRY_MIRROR="${CARGO_REGISTRY_MIRROR:-}"
+BPF_LINKER_DOWNLOAD_BASE="${BPF_LINKER_DOWNLOAD_BASE:-https://github.com/aya-rs/bpf-linker/releases/download}"
+BPF_LINKER_VERSION="${BPF_LINKER_VERSION:-0.12.0}"
+BPF_LINKER_SOURCE="${BPF_LINKER_SOURCE:-0}"
+RUST_VERSION="${RUST_VERSION:-stable}"
+RUST_NIGHTLY="${RUST_NIGHTLY:-nightly-2026-11-01}"
+LLVM_VERSION="${LLVM_VERSION:-23}"
+LLVM_MIRROR="${LLVM_MIRROR:-}"
+LLVM_GPG_KEY_URL="${LLVM_GPG_KEY_URL:-}"
 
 LLVM_PREFIX="/usr/lib/llvm-${LLVM_VERSION}"
 CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
@@ -135,10 +128,10 @@ fi
 # bpf-linker release archive; git is needed for any git-sourced crate.
 #
 # A stock GitHub-hosted Ubuntu runner already ships all of these, and its image
-# carries a cloud-init mirror list whose rewrite leaves `build-essential` with
-# "no installation candidate" even after a clean update (see the netcheck
-# diagnostic), so an image that already has the tools skips apt entirely. Bare
-# images (the Gitee Go runner) still take the apt path.
+# carries a cloud-init mirror list worth rewriting (apt-mirrors.txt points at
+# azure.archive.ubuntu.com, which does not resolve there), so an image that
+# already has the tools skips apt entirely and the mirror rewrite below only
+# matters for bare images (self-hosted runners, container base images).
 bootstrap_ready() {
     local tool
     for tool in cc make git curl zstd; do
@@ -440,7 +433,7 @@ if bpf_linker_present; then
 elif [ "${BPF_LINKER_SOURCE}" = "1" ] || ! install_bpf_linker_prebuilt; then
     if [ "${BPF_LINKER_SOURCE}" != "1" ]; then
         warn "no prebuilt archive was reachable; falling back to a source build"
-        warn "tip: point CI_BPF_LINKER_DOWNLOAD_BASE at a reachable mirror to skip the compile"
+        warn "tip: point BPF_LINKER_DOWNLOAD_BASE at a reachable mirror to skip the compile"
     fi
     build_bpf_linker_from_source \
         || { echo "error: could not install bpf-linker (prebuilt unreachable, source build failed)" >&2; exit 1; }
