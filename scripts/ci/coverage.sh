@@ -3,8 +3,10 @@
 #
 # probe-ebpf is deliberately not covered: it is #![no_std] #![no_main] and only
 # builds for a bpf target, so it cannot be instrumented for a host test run.
-# main.rs is excluded by filename because it is process wiring (747 lines, no
-# tests) and would drown the ratio.
+# The process wiring is excluded by filename: `main.rs` is a three-line shell and
+# `app.rs` holds the aya/tokio setup that a host test cannot exercise, so keeping
+# them would drown the ratio. Everything they call lives in `pipeline`, `ports`,
+# `aggregate` and `sink`, which the L0 and L2 layers do cover.
 #
 # The eBPF object itself is built *before* instrumentation and handed to
 # probe/build.rs through PROBE_EBPF_PREBUILT: aya-build drives a nested
@@ -47,7 +49,7 @@ printf '[coverage] eBPF object: %s\n' "${ebpf_object}"
 args=(
     -p probe
     -p probe-common
-    --ignore-filename-regex '(^|/)main\.rs$'
+    --ignore-filename-regex '(^|/)(main|app)\.rs$'
     --lcov
     --output-path "${COVERAGE_LCOV:-target/lcov.info}"
 )

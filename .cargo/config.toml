@@ -1,2 +1,7 @@
-[target."cfg(all())"]
-runner = "sudo -E"
+# `cargo test` must not run the test binaries through `sudo`. The previous
+# `runner = "sudo -E"` applied to every target, which made the unit layers
+# depend on a password prompt and hid the fact that only the eBPF loading path
+# needs privileges. Privileges now belong to the e2e container only.
+[alias]
+# `cargo xtask <command>` — see `xtask/src/main.rs` for the command list.
+xtask = "run --package xtask --"
