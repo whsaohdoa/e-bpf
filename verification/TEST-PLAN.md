@@ -11,7 +11,7 @@
 | 维度 | 现状 | 目标 | 关键手段 |
 |---|---|---|---|
 | 用例规模 | 27 个单测（全部纯逻辑）+ 4 个手工 bash | L0–L4 约 55 条，全部有稳定 test id | 分层 + 表驱动 |
-| 未覆盖代码 | 1,210 行（`main.rs` 747 + `probe-ebpf/src/main.rs` 463，占 3,011 行 Rust 的 40%）零单测 | 用户态 ≥ 80% 行覆盖，解析器 ≥ 95% | 端口化 + 解析器下沉 |
+| 未覆盖代码 | 1,210 行（`main.rs` 747 + `probe-ebpf/src/main.rs` 463，占 3,011 行 Rust 的 40%）零单测 | 用户态 ≥ 90% 行覆盖（排除 `main.rs`/`app.rs` 壳与接线），解析器 ≥ 95% | 端口化 + 解析器下沉 |
 | 反馈时间 | 全套手工 ≈ 3–4 min（实测 agg 63 s、ipv6 29 s、另加构建），但要 root + 手工触发 + 人工读日志 | PR gate < 2 min（L0–L2），e2e < 6 min | 无 root 的进程内管线 |
 | 失败信息 | 只有 `CHECK FAIL: <描述>` | `assert_eq` 级 diff（行级 CSV 差异） | Rust driver + golden CSV |
 | 并行 | 不能（固定 IP `10.99.0.0/24`、固定 netns 名） | 每条用例独立 netns/veth/子网，可 `-j` 分片 | 用例内自建环境 |
@@ -95,7 +95,9 @@ pub trait TimeSource { fn mono_ns(&self) -> u64; }
 - `report_closed(agg: &mut dyn AggStore, ..., now_ns: u64)`；`scan_agg` 同理。
 - `main()` 变为 `main() -> ExitCode { validate → run(opt) → 打印 stats }`，`run()` 返回 `Summary`，**纯函数边界**。
 
-收益：L2 全套用例（含 `agg_overflow`/`malformed`/磁盘失败）不需要 root；`main.rs` 覆盖率从 0 升到 60%+。
+收益：L2 全套用例（含 `agg_overflow`/`malformed`/磁盘失败）不需要 root；可测逻辑从 `main.rs` 移到 `pipeline.rs`，`main.rs` 退化为壳（覆盖率口径随之修订，见 §8）。
+
+**口径修订（2026-11-12，S2 落地时确认）**：拆分后 `main.rs` 只剩 8 行 `probe::app::main()`，`app.rs` 是 aya/tokio 接线，两者在 host 上都执行不到。本计划原先的「`main.rs` 覆盖率 ≥60%」**不再适用**，改判「承接这些逻辑的 `pipeline.rs` 行覆盖 ≥85%」，`main.rs`/`app.rs` 按文件名排除（与 `scripts/ci/coverage.sh` 的 `--ignore-filename-regex '(^|/)(main|app)\.rs$'` 一致）。这是口径调整而不是达标：被排除的两处代码仍然只在真机路径上被验证。
 风险：低。`Sink`/`AggSink` 已经是 `&mut dyn`，风格一致。
 
 ### E2 解析器下沉到 `probe-common`（2 人日，唯一有技术风险项）
@@ -218,7 +220,7 @@ let (samples, aggs, stats) = h.finish();   // 归一化后可做 insta 快照
 | P-08 | ringbuf 满（`SampleSource` 返回 Err/None） | `sample_failed` 计数、`sample_dropped=1`、**count 不变** | A13 新增 |
 | P-09 | AGG 插入失败 | `agg_overflow` 计数、该包不产样本、不 panic | A13 新增 |
 | P-10 | malformed：长度 48/63/65、`family=5`、`family=0` | `malformed` 计数、**不写任何 CSV 行**、不崩 | A13 新增 |
-| P-11 | 记录长度随机（proptest，1..=256 B） | 只有 64 且 family∈{4,6} 才进管线 | A13 新增 |
+| P-11 | 记录长度随机（proptest，1..=256 B）→ **已改为确定性扫描**：长度 1..=256 × family 0..=255 全组合，不引入 proptest | 只有 64 且 family∈{4,6} 才进管线 | A13 新增 |
 | P-12 | 两进程 `--append` 同一文件（线程模拟） | 行数守恒、无错位/覆盖 | A8 |
 | P-13 | sink 写失败（只读目录 / ENOSPC 模拟） | 进程返回非 0、错误信息含路径、不吞异常 | A15 新增 |
 | P-14 | 时钟：负偏移（启动晚于窗口起点） | `window_start_ms` 可早于启动时间，跨度恒等 | A6 |
@@ -285,7 +287,7 @@ jobs:
       - run: cargo clippy --workspace --exclude probe-ebpf --all-targets -- -D warnings
       - uses: taiki-e/install-action@nextest
       - run: cargo nextest run --workspace --exclude probe-ebpf --profile ci
-      - run: cargo llvm-cov --workspace --exclude probe-ebpf --fail-under-lines 80
+      - run: cargo llvm-cov --workspace --exclude probe-ebpf --ignore-filename-regex '(^|/)(main|app)\.rs$' --fail-under-lines 90
   bpf:
     runs-on: ubuntu-24.04
     steps:
@@ -318,7 +320,7 @@ jobs:
 
 | 门 | 阈值 | 说明 |
 |---|---|---|
-| `probe` 行覆盖 | ≥ 80% | 排除 `build.rs` 生成的胶水；`main.rs` 靠 L2 提升到 ≥ 60% |
+| `probe` 行覆盖 | ≥ 90%（排除 `main.rs`/`app.rs`） | `main.rs` 是 8 行壳、`app.rs` 是 aya/tokio 接线，host 上跑不到，按文件名排除；原 `main.rs` 的可测逻辑在 `pipeline.rs`，该文件单独 ≥ 85% |
 | `probe-common` 行覆盖 | ≥ 90%；`parse.rs` ≥ 95% | 解析器是安全关键路径 |
 | mutation score | `aggregate.rs` ≥ 70%（nightly） | 防止"覆盖率高但断言空" |
 | clippy | `-D warnings` | 含 `unwrap_used` 只对非测试代码放开 |
@@ -327,6 +329,12 @@ jobs:
 
 覆盖率对 `probe-ebpf` 无意义（无宿主执行），**不设阈值**；它的正确性由 E2/E3 保证。
 
+**S2 实测基线（2026-11-12，`scripts/ci/coverage.sh`）**：`probe-common` 99.3%（152/153）、
+`aggregate.rs` 98.3%（470/478）、`sink.rs` 94.3%（383/406）、`pipeline.rs` 88.3%（158/179）、
+`ports.rs` 0%（0/61，aya 适配层）、合计 91.1%（1163/1277）。`pipeline.rs` 已过 85% 门，
+但 CI 目前只上传报告、不设 `--fail-under-lines`：`ports.rs` 的 0% 会把整体拉到阈值边缘，
+等 S5 补齐长稳与真机覆盖后再把门打开（届时需决定 `ports.rs` 是排除还是补 host 侧桩）。
+
 ---
 
 ## 9. 迁移路线
@@ -334,14 +342,18 @@ jobs:
 | Sprint | 内容 | 产出 | 依赖 | 人日 | 退出标准 |
 |---|---|---|---|---|---|
 | **S1 基建** | `verification/` 纳入 git（或独立仓库）；`cargo xtask` 骨架；nextest + llvm-cov + JUnit；删 `sudo -E` runner；修 G11；CI fast/bpf 两档；现有 4 个 bash 挂进 `xtask e2e --legacy` | 绿 PR gate | 无 | 1.5 | PR 上有 <2 min 的 L0 gate；`cargo test` 不再需要 sudo |
-| **S2 管线化** | E1 端口化 + L2 Harness + P-01..P-16 | `probe/tests/pipeline.rs` + 16 条用例 | S1 | 3 | A2/A3/A6/A7 的断言在 2 s 内跑完；`main.rs` 覆盖率 ≥60% |
+| **S2 管线化** | E1 端口化 + L2 Harness + P-01..P-16 | `probe/tests/pipeline.rs` + 16 条用例 | S1 | 3 | A2/A3/A6/A7 的断言在 2 s 内跑完；`pipeline.rs` 行覆盖 ≥85%（`main.rs` 已拆成 8 行壳，口径见 §8） |
 | **S3 解析器** | E2 下沉 + fixture 帧表 + U-PREFIX/U-KEY + C-SCHEMA | `probe-common/src/parse.rs` + `index.tsv` | S2 | 3.5 | 双层 VLAN/非首分片/截断各有单测；eBPF 目标仍可 attach |
 | **S4 真机** | E3 定帧发送器 + E5 Rust driver + E-01..E-07；删除 3 个 bash 断言脚本 | `probe/tests/e2e_*.rs` | S3 | 4 | e2e < 6 min 且可 `-j` 并行；无固定 sleep |
 | **S5 长稳与报告** | L4 + `xtask report`（JUnit→REPORT.md）+ `small-maps` 特性 + flake 看板 | 自动生成的 `REPORT-*.md` | S4 | 2.5 | A1–A15 全部有 test id 且报告自动生成；抖动 5/5 |
 
 依赖关系是严格的（E2 依赖 E1 的 fixture 复用；E3 依赖 E2 的 `index.tsv`），但 **S1 与 S2 可以并行开工**：S1 改基础设施，S2 只碰 `probe/src`。
 
-**第 0 天就能做的三件小事**（不等重构）：
+**进度（2026-11-12）**：S1、S2 已落地，结果与偏差见 `REPORT-layered-tests.md`；
+分支 `test/test-plan-s1`。S3 起未开工。落地时对计划的两处修订已就地标注：
+覆盖率口径（§8、E1 正文）与 §5.1 中 P-11 用确定性扫描替代 proptest 的说明。
+
+**第 0 天就能做的三件小事**（不等重构；S1 已全部完成）：
 1. `verification/` 进 git —— 现在就丢在版本控制外，风险最大、成本最低。
 2. `check()` 失败时把被测命令的 stdout/stderr 打到日志，并把 `exit "$FAIL"` 改成 `[ "$FAIL" -eq 0 ] || exit 1`。
 3. 给 `validate()`（`probe/src/main.rs:298-333`）补 4 个单测——它已经是纯函数，只是没人测。

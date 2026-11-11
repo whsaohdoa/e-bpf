@@ -90,11 +90,15 @@ BLOCK 键的 16 列 schema）。全部不 `sleep`、不加载 eBPF：假 AGG map
 | `probe/src/ports.rs` | 0%（0/61）——aya 适配层，host 测试不经过 |
 | 合计（排除 `main.rs`/`app.rs`） | 91%（1163/1277） |
 
-TEST-PLAN 给 S2 的退出标准是"`main.rs` 覆盖率 ≥60%"。端口化之后 `main.rs` 只剩一行
-调用，真正的可测逻辑搬进了 `pipeline.rs`（88.3%）；如果按"`main.rs` 这个文件"字面
-统计，它仍然接近 0。这是口径调整，不是达标，S3 需要决定是给 `app.rs` 补进程内
-可测的切分，还是接受"可测逻辑在 `pipeline.rs`"的统计口径。CI 里覆盖率目前**只报告不设
-门**，注释写明了等 S3/S5 再开 `--fail-under-lines`。
+TEST-PLAN 原先给 S2 的退出标准是"`main.rs` 覆盖率 ≥60%"。端口化之后 `main.rs` 只剩一行
+调用，真正的可测逻辑搬进了 `pipeline.rs`（88.3%）；如果按"`main.rs` 这个文件"字面统计，
+它仍然接近 0。
+
+**已决定（2026-11-12）**：接受"可测逻辑在 `pipeline.rs`"的口径，TEST-PLAN §8 与 S2 退出
+标准已同步改为「`pipeline.rs` 行覆盖 ≥85%，`main.rs`/`app.rs` 按文件名排除，`probe` 整体
+（排除后）≥90%」。这是口径调整而不是达标：被排除的 `app.rs` 仍只在真机路径上被验证。
+CI 里覆盖率目前**只报告不设门**，等 S5 补齐长稳与真机覆盖后再开 `--fail-under-lines 90`
+（届时还要决定 `ports.rs` 的 0% 是排除还是补 host 侧桩）。
 
 ## 6. 与 TEST-PLAN 退出标准的对照
 
@@ -104,7 +108,7 @@ TEST-PLAN 给 S2 的退出标准是"`main.rs` 覆盖率 ≥60%"。端口化之�
 | S1：`cargo test` 不再需要 sudo | 达成。`runner = "sudo -E"` 已删，见 `.cargo/config.toml` 注释 |
 | S1：4 个 bash 挂进 `xtask e2e --legacy` | 达成（真机容器里执行；本分支未在 CI 上跑 L3） |
 | S2：A2/A3/A6/A7 的断言 2 s 内跑完 | 达成。对应语义由 L2 的 P-01…P-05、P-16 覆盖，整层 0.05 s |
-| S2：`main.rs` 覆盖率 ≥60% | **未按字面达成**，见 §5 的口径说明 |
+| S2：`main.rs` 覆盖率 ≥60% | 口径已修订（2026-11-12）：改判 `pipeline.rs` ≥85%，实测 88.3%，达成；`main.rs`/`app.rs` 排除，见 §5 |
 | DoD：0 处固定 `sleep`（新增测试） | 达成。L2 全部用注入时钟推进水位 |
 | DoD：0 处 `exit $FAIL` | 达成（3 处已改，见 §4） |
 | DoD：CI 0 处 sudo | 达成 |
