@@ -1,0 +1,7 @@
+# Artefacts the verification scripts write next to themselves.  The scripts,
+# TEST-PLAN and the reports are versioned; multi-megabyte CSVs and logs are not.
+*.csv
+*.log
+perf/
+traffic_gen
+drawio-probe/

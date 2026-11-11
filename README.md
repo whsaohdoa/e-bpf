@@ -375,8 +375,11 @@ sudo -E ./target/release/probe \
 
 `cargo build --release` 会通过 `probe/build.rs` 构建 `probe-ebpf` 并把对象嵌进二进制，
 所以改了 `probe-common`/`probe-ebpf` 之后**必须重新构建**，不能只替换二进制里的对象。
-`cargo run` 也可用（`.cargo/config.toml` 里 `runner = "sudo -E"`），但验证时建议先
-`cargo build --release` 再直接执行二进制，避免 sudo 环境差异触发重建。
+
+`cargo test` 与 `cargo run` 都不再经过 `sudo`：`.cargo/config.toml` 里原先全局的
+`runner = "sudo -E"` 已删除（它让单测也依赖密码提示，并掩盖了"只有加载 eBPF 才需要特
+权"这件事）。加载 XDP 仍然需要特权，所以真机验证要么直接 `sudo -E ./target/release/probe`，
+要么在 `docker compose` 的特权开发容器里跑 `cargo xtask e2e --legacy`。
 
 ### rust-analyzer 的 E0152
 
@@ -396,6 +399,21 @@ item `panic_impl`”。真实 eBPF 构建使用 `--target bpfel-unknown-none` +
 两种视图，不改变生成的 eBPF 对象。
 
 ## 验证方式
+
+测试分三层，全部不需要特权，也不需要内核：
+
+| 层 | 命令 | 内容 |
+|---|---|---|
+| L0 | `cargo xtask test --layer l0` | `aggregate` / `sink` / `ports` 的纯逻辑单测与 ABI 布局 |
+| L1 | `cargo xtask test --layer l1` | CLI 契约（`probe/tests/` 里非 `pipeline` 的文件，当前为空） |
+| L2 | `cargo xtask test --layer l2` | 进程内管线 P-01…P-16：假 AGG map、可脚本化 ringbuf、内存 sink、注入时钟 |
+
+`cargo xtask test`（不带 `--layer`）按 L0→L1→L2 顺序跑全部；优先用 `cargo nextest`
+（`--profile ci` 会额外写 JUnit），没安装时自动回落 `cargo test`。`cargo xtask report`
+汇总上一次的 JUnit 报告。L2 不 `sleep`、不加载 eBPF，整层在毫秒级跑完；窗口关闭、迟到
+样本、去重、CSV 列序这些语义都由它守回归。
+
+真机部分仍是下面这些脚本，在特权容器里可用 `cargo xtask e2e --legacy` 一次跑完：
 
 仓库根目录（挂载为容器内 `/workspace`）的 `verification/` 下有可重复执行的脚本，全部
 使用真实 veth + netns，不做 mock：
