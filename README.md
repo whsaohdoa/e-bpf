@@ -413,6 +413,9 @@ item `panic_impl`”。真实 eBPF 构建使用 `--target bpfel-unknown-none` +
 汇总上一次的 JUnit 报告。L2 不 `sleep`、不加载 eBPF，整层在毫秒级跑完；窗口关闭、迟到
 样本、去重、CSV 列序这些语义都由它守回归。
 
+分层测试的落地细节、L2 抓出的两个 bug、覆盖率实测与未完成项见
+`verification/REPORT-layered-tests.md`。
+
 真机部分仍是下面这些脚本，在特权容器里可用 `cargo xtask e2e --legacy` 一次跑完：
 
 仓库根目录（挂载为容器内 `/workspace`）的 `verification/` 下有可重复执行的脚本，全部
