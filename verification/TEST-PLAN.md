@@ -350,7 +350,9 @@ jobs:
 依赖关系是严格的（E2 依赖 E1 的 fixture 复用；E3 依赖 E2 的 `index.tsv`），但 **S1 与 S2 可以并行开工**：S1 改基础设施，S2 只碰 `probe/src`。
 
 **进度（2026-11-12）**：S1、S2 已落地，结果与偏差见 `REPORT-layered-tests.md`；
-分支 `test/test-plan-s1`。S3 起未开工。落地时对计划的两处修订已就地标注：
+S3 已落地（分支 `test/test-plan-s3`），`parse.rs` 行覆盖 99.1%、`probe-common` 99.2%，
+整体 93.2%，`run_e2e.sh` 在特权容器 PASS，结果与偏差见 `REPORT-parser.md`
+（含 `parse_ip` 改用 `Result` 的说明）。S4 起未开工。落地时对计划的两处修订已就地标注：
 覆盖率口径（§8、E1 正文）与 §5.1 中 P-11 用确定性扫描替代 proptest 的说明。
 
 **第 0 天就能做的三件小事**（不等重构；S1 已全部完成）：
