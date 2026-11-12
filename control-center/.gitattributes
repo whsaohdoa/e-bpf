@@ -1,0 +1,7 @@
+# Bash entry points must stay LF even on a Windows checkout, otherwise the shebang and
+# `set -euo pipefail` break under Git Bash / WSL.
+*.sh   text eol=lf
+Dockerfile text eol=lf
+*.yaml text eol=lf
+*.yml  text eol=lf
+*.sql  text eol=lf

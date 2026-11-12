@@ -1,0 +1,27 @@
+# Exactly one public entry point: the SPA and the management API. /internal/ and /agent/
+# are not routed here at all, which is the ingress-level half of "no direct reach to the
+# control plane"; the NetworkPolicy is the enforcement half.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: cc
+  namespace: cc-train0
+spec:
+  ingressClassName: traefik
+  rules:
+    - http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: cc-mgmt
+                port:
+                  number: 8080
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: cc-web
+                port:
+                  number: 80

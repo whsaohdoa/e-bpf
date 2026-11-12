@@ -1,0 +1,26 @@
+# k3d cluster for the Train 0 control center.
+# 8080/8443 on the host map to the Traefik load balancer, which is why the compose stack
+# uses 8080 for the SPA as well: the same URL works whether you run compose or k3d.
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: cc-train0
+servers: 1
+agents: 0
+kubeAPI:
+  hostPort: "6550"
+ports:
+  - port: 8080:80
+    nodeFilters:
+      - loadbalancer
+  - port: 8443:443
+    nodeFilters:
+      - loadbalancer
+options:
+  k3s:
+    extraArgs:
+      # NetworkPolicy enforcement is the k3s default CNI (flannel + kube-router netpol
+      # controller); nothing to enable. metrics-server is noise for this plan.
+      - arg: --disable=metrics-server
+        nodeFilters:
+          - server:*

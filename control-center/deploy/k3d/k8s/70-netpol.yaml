@@ -1,0 +1,96 @@
+# Default-deny ingress for the whole namespace, then explicit holes. k3s enforces
+# NetworkPolicy with its bundled kube-router controller (kind's default CNI does not), which
+# is why the plan's acceptance step 15 -- "bob on the SPA cannot reach the control plane" --
+# is demonstrable on k3d.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: cc-train0
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+---
+# The SPA is served to the browser and to Traefik.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-web
+  namespace: cc-train0
+spec:
+  podSelector:
+    matchLabels:
+      app: cc-web
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - port: 80
+---
+# The management API is reachable from the SPA (same-origin /api proxy) and from Traefik.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-mgmt
+  namespace: cc-train0
+spec:
+  podSelector:
+    matchLabels:
+      app: cc-mgmt
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: cc-web
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 8080
+---
+# The control plane accepts traffic from the management plane only: no browser, no ingress
+# controller, no other pod in the namespace. This is the structural version of the trust
+# boundary, independent of any JWT claim.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-control-from-mgmt-only
+  namespace: cc-train0
+spec:
+  podSelector:
+    matchLabels:
+      app: cc-control
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: cc-mgmt
+      ports:
+        - port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-pg-from-apps
+  namespace: cc-train0
+spec:
+  podSelector:
+    matchLabels:
+      app: cc-pg
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: cc-mgmt
+        - podSelector:
+            matchLabels:
+              app: cc-control
+      ports:
+        - port: 5432
