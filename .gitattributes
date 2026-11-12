@@ -14,3 +14,8 @@ docker-compose.yml  text eol=lf
 # CI entry points are bash scripts; a CRLF checkout (core.autocrlf=true on the
 # Windows dev machine) makes them fail under Linux with `$'\r': command not found`.
 *.sh text eol=lf
+
+# Packet fixtures are raw Ethernet bytes: any EOL rewrite would corrupt them.
+# The index is tab-separated and parsed byte-for-byte by the L0 fixture test.
+probe/tests/fixtures/frames/*.bin binary
+probe/tests/fixtures/frames/index.tsv text eol=lf

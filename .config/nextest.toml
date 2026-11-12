@@ -1,0 +1,11 @@
+# nextest configuration for CI.
+#
+# The `ci` profile is the default profile plus a JUnit report, which the
+# `xtask report` command summarises and the workflow uploads as an artifact.
+# Local runs stay on the default profile, so nothing here costs a local run
+# anything.
+[profile.ci]
+fail-fast = false
+
+[profile.ci.junit]
+path = "junit.xml"

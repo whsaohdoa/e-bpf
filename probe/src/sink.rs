@@ -32,7 +32,7 @@ use std::{
     io::{BufWriter, Write},
     mem::size_of,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use anyhow::{Context as _, Result};
@@ -174,7 +174,6 @@ fn open_append(path: &Path, append: bool) -> Result<BufWriter<File>> {
     // the file explicitly and then appends from row 0.
     let file = OpenOptions::new()
         .create(true)
-        .write(true)
         .append(true)
         .open(path)
         .with_context(|| format!("open output file {}", path.display()))?;
@@ -185,9 +184,56 @@ fn open_append(path: &Path, append: bool) -> Result<BufWriter<File>> {
     Ok(BufWriter::new(file))
 }
 
+/// Advisory exclusive lock on the output file, held only while the header is
+/// checked and written.
+///
+/// Two probes may share one CSV (`--append` on both ends of a veth pair, see
+/// `verification/run_e2e_ipv6.sh`).  Without the lock both open an empty file,
+/// both see length 0 and both write a header, so the file starts with two header
+/// rows and every row counter is off by one.
+#[cfg(unix)]
+struct FileLock(std::os::fd::RawFd);
+
+#[cfg(unix)]
+impl FileLock {
+    fn exclusive(file: &File, path: &Path) -> Result<Self> {
+        use std::os::fd::AsRawFd as _;
+
+        let fd = file.as_raw_fd();
+        // SAFETY: `fd` stays open for as long as the borrowed `File` lives, and
+        // `flock` only changes this process's advisory lock on that description.
+        if unsafe { libc::flock(fd, libc::LOCK_EX) } != 0 {
+            return Err(std::io::Error::last_os_error())
+                .with_context(|| format!("lock output file {}", path.display()));
+        }
+        Ok(Self(fd))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        // SAFETY: the guard cannot outlive its `File`, so the descriptor is open.
+        unsafe { libc::flock(self.0, libc::LOCK_UN) };
+    }
+}
+
+#[cfg(not(unix))]
+struct FileLock;
+
+#[cfg(not(unix))]
+impl FileLock {
+    fn exclusive(_file: &File, _path: &Path) -> Result<Self> {
+        Ok(Self)
+    }
+}
+
 /// Writes `header` when the file is still empty (fresh file or `--append` run
 /// that found no previous rows).
 fn write_header_if_empty(writer: &mut BufWriter<File>, path: &Path, header: &str) -> Result<()> {
+    // The lock covers the check and the write: a second process starting at the
+    // same moment either writes the header first or finds it already there.
+    let _lock = FileLock::exclusive(writer.get_ref(), path)?;
     let empty = writer
         .get_ref()
         .metadata()
@@ -206,6 +252,9 @@ fn write_header_if_empty(writer: &mut BufWriter<File>, path: &Path, header: &str
 pub struct CsvSink {
     writer: BufWriter<File>,
     iface: String,
+    /// Kept so write failures name the file the operator asked for; the
+    /// `io::Error` alone cannot say which of the two CSVs broke.
+    path: PathBuf,
 }
 
 impl CsvSink {
@@ -217,12 +266,14 @@ impl CsvSink {
         Ok(Self {
             writer,
             iface: iface.to_owned(),
+            path: path.to_path_buf(),
         })
     }
 }
 
 impl Sink for CsvSink {
     fn write_batch(&mut self, events: &[Event]) -> Result<()> {
+        let path = &self.path;
         for event in events {
             // Ports are always integers, so the row always has 7 columns;
             // ICMP/ICMPv6 rows simply carry 0 for both ports.
@@ -237,13 +288,16 @@ impl Sink for CsvSink {
                 event.dst_port,
                 event.protocol
             )
-            .context("write sample CSV row")?;
+            .with_context(|| format!("write sample CSV row to {}", path.display()))?;
         }
         Ok(())
     }
 
     fn flush(&mut self) -> Result<()> {
-        self.writer.flush().context("flush sample CSV file")
+        let path = &self.path;
+        self.writer
+            .flush()
+            .with_context(|| format!("flush sample CSV file {}", path.display()))
     }
 }
 
@@ -261,6 +315,8 @@ pub struct AggCsvSink {
     iface: String,
     config: ProbeConfig,
     clock: Clock,
+    /// Same reason as [`CsvSink::path`]: failures must name the output file.
+    path: PathBuf,
 }
 
 impl AggCsvSink {
@@ -280,12 +336,14 @@ impl AggCsvSink {
             iface: iface.to_owned(),
             config,
             clock,
+            path: path.to_path_buf(),
         })
     }
 }
 
 impl AggSink for AggCsvSink {
     fn write_rows(&mut self, rows: &[AggRecord]) -> Result<()> {
+        let path = &self.path;
         for row in rows {
             let key = &row.key;
             writeln!(
@@ -310,13 +368,16 @@ impl AggSink for AggCsvSink {
                 u8::from(row.degraded),
                 u8::from(row.window_complete),
             )
-            .context("write aggregate CSV row")?;
+            .with_context(|| format!("write aggregate CSV row to {}", path.display()))?;
         }
         Ok(())
     }
 
     fn flush(&mut self) -> Result<()> {
-        self.writer.flush().context("flush aggregate CSV file")
+        let path = &self.path;
+        self.writer
+            .flush()
+            .with_context(|| format!("flush aggregate CSV file {}", path.display()))
     }
 }
 

@@ -4,7 +4,10 @@ members = [
     "probe",
     "probe-common",
     "probe-ebpf",
+    "xtask",
 ]
+# `xtask` stays out of the default members: `cargo build`/`cargo test` should
+# only cover the shipped crates, and `cargo xtask` names its package explicitly.
 default-members = ["probe", "probe-common"]
 
 [workspace.package]
