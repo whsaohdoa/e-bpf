@@ -123,7 +123,7 @@ truncated_eth.bin	-	-	-	0	0	0	0
 
 ## 5. 与计划的偏差
 
-1. **`parse_ip` 返回 `Result<L3Info, ParseError>`，不是 §4 写的 `Option<L3Info>`。**
+1. **`parse_ip` 返回 `Result<L3Info, ParseError>`，不是计划初稿写的 `Option<L3Info>`（TEST-PLAN §4 已按实测更新）。**
    `Err` 分支在数据面同样只是 `XDP_PASS`，成本相同；但 `ParseError` 让"截断/坏 ihl/
    未知 ethertype"在测试里可以精确断言，避免一个 `None` 把三类 bug 混在一起。
 2. **未引入 proptest（也未引入任何新依赖）。** U-PREFIX-01 用固定 LCG 扫描
