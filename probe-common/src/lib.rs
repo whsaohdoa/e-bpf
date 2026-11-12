@@ -20,6 +20,7 @@
 //! written to `CONFIG`.
 #![no_std]
 
+// Unit tests need `std::fs` for the frame fixtures; the library itself stays
 // `no_std` and the data path never sees this import.
 #[cfg(test)]
 extern crate std;
@@ -341,6 +342,91 @@ mod tests {
         assert_eq!(mask_src_prefix(&v6, 128), v6);
         assert_eq!(mask_src_prefix(&v6, 0), [0u8; 16]);
         assert_eq!(mask_src_prefix(&v6, 255), v6);
+    }
+
+    /// Deterministic address scan: masking must be idempotent and must keep
+    /// exactly the bits inside the prefix.
+    ///
+    /// A small LCG is used instead of `proptest` on purpose: S3 does not add
+    /// dev-dependencies, and the sweep below covers the same invariant space
+    /// (see `verification/REPORT-parser.md`).
+    #[test]
+    fn u_prefix_01_mask_is_idempotent_and_keeps_prefix_bits() {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        for _ in 0..512 {
+            let mut addr = [0u8; 16];
+            for byte in addr.iter_mut() {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                *byte = (state >> 33) as u8;
+            }
+
+            for prefix in 0..=128u8 {
+                let masked = mask_src_prefix(&addr, prefix);
+                assert_eq!(
+                    mask_src_prefix(&masked, prefix),
+                    masked,
+                    "masking /{prefix} twice changed the result"
+                );
+
+                let bits = prefix as usize;
+                for i in 0..16 {
+                    let base = i * 8;
+                    if base + 8 <= bits {
+                        assert_eq!(
+                            masked[i], addr[i],
+                            "/{prefix}: byte {i} is inside the prefix"
+                        );
+                    } else if base >= bits {
+                        assert_eq!(masked[i], 0, "/{prefix}: byte {i} is past the prefix");
+                    } else {
+                        let keep = bits - base;
+                        let keep_mask = 0xffu8 << (8 - keep);
+                        assert_eq!(
+                            masked[i],
+                            addr[i] & keep_mask,
+                            "/{prefix}: byte {i} partial"
+                        );
+                        assert_eq!(masked[i] & !keep_mask, 0, "/{prefix}: byte {i} host bits");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Family boundaries: IPv4 lives in the first four bytes, IPv6 uses all
+    /// sixteen, and out-of-range lengths clamp instead of panicking.
+    #[test]
+    fn u_prefix_02_family_boundaries_stay_aligned() {
+        let mut v4 = [0u8; 16];
+        v4[..4].copy_from_slice(&[10, 99, 0, 2]);
+
+        let host32 = mask_src_prefix(&v4, 32);
+        assert_eq!(host32[..4], [10, 99, 0, 2]);
+        assert_eq!(
+            host32[4..],
+            [0u8; 12],
+            "IPv4 /32 must not leak into bytes 4..16"
+        );
+
+        assert_eq!(mask_src_prefix(&v4, 0), [0u8; 16]);
+
+        // One bit of the first byte survives at /1; the rest is zeroed.
+        let mut top_bit = [0u8; 16];
+        top_bit[0] = 0x80;
+        assert_eq!(mask_src_prefix(&top_bit, 1), top_bit);
+        top_bit[0] = 0x7f;
+        assert_eq!(mask_src_prefix(&top_bit, 1), [0u8; 16]);
+
+        let v6: [u8; 16] = [0xfd, 0x00, 0x00, 0x99, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
+        assert_eq!(mask_src_prefix(&v6, 128), v6);
+        assert_eq!(mask_src_prefix(&v6, 255), v6, "lengths above 128 clamp");
+        assert_eq!(mask_src_prefix(&v6, 0), [0u8; 16]);
+
+        // /33 is past the IPv4 address but still legal: the address bytes stay
+        // intact and everything after them is already zero.
+        assert_eq!(mask_src_prefix(&v4, 33)[..4], [10, 99, 0, 2]);
     }
 
     #[test]

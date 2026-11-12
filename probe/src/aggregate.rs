@@ -802,4 +802,98 @@ mod tests {
         assert_eq!(bounds.window_start_ms(1, WINDOW_NS), 1_010_000);
         assert_eq!(bounds.window_end_ms(1, WINDOW_NS), 1_020_000);
     }
+
+    /// Reproducible pseudo-random key material (no `proptest`; S3 adds no
+    /// dev-dependencies — see `verification/REPORT-parser.md`).
+    fn lcg(state: &mut u64) -> u64 {
+        *state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        *state >> 33
+    }
+
+    fn pseudo_record(state: &mut u64) -> AggRecord {
+        let mut record = AggRecord {
+            window_id: lcg(state) % 4,
+            ..AggRecord::default()
+        };
+        record.key.window_id = record.window_id;
+        record.key.family = if lcg(state).is_multiple_of(2) {
+            FAMILY_IPV4
+        } else {
+            FAMILY_IPV6
+        };
+        record.key.direction = DIRECTION_INGRESS;
+        for byte in record.key.src_prefix.iter_mut() {
+            *byte = lcg(state) as u8;
+        }
+        for byte in record.key.dst_addr.iter_mut() {
+            *byte = lcg(state) as u8;
+        }
+        record.key.dst_port = (lcg(state) % 5) as u16;
+        record.key.protocol = (lcg(state) % 3) as u8;
+        record.key.action = (lcg(state) % 2) as u8;
+        record.key.rule_id = (lcg(state) % 2) as u32;
+        record.key.reason = (lcg(state) % 2) as u8;
+        record.count = lcg(state) % 100;
+        record.first_seen = lcg(state);
+        record.last_seen = lcg(state);
+        record.window_complete = true;
+        record
+    }
+
+    /// The ordering fields of an [`AggRecord`], used to compare sort results.
+    type OrderProjection = (u64, u8, u8, [u8; 16], [u8; 16], u16, u8, u8, u32, u8);
+
+    /// The ordering fields only: two records with this tuple equal are
+    /// interchangeable for the CSV order.
+    fn order_projection(record: &AggRecord) -> OrderProjection {
+        let key = &record.key;
+        (
+            record.window_id,
+            key.family,
+            key.direction,
+            key.src_prefix,
+            key.dst_addr,
+            key.dst_port,
+            key.protocol,
+            key.action,
+            key.rule_id,
+            key.reason,
+        )
+    }
+
+    /// `sort_records` is a total, deterministic order: every permutation of the
+    /// same rows collapses to the same sequence of ordering keys.
+    #[test]
+    fn u_key_01_sort_records_is_total_and_deterministic() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let rows: Vec<AggRecord> = (0..256).map(|_| pseudo_record(&mut state)).collect();
+
+        let mut sorted = rows.clone();
+        sort_records(&mut sorted);
+        for pair in sorted.windows(2) {
+            assert_ne!(
+                record_order(&pair[0], &pair[1]),
+                Ordering::Greater,
+                "sorted rows must be non-decreasing"
+            );
+        }
+
+        let expected: Vec<_> = sorted.iter().map(order_projection).collect();
+        for rotation in [1usize, 7, 63, 255] {
+            let mut shuffled = Vec::with_capacity(rows.len());
+            shuffled.extend(rows[rotation..].iter().copied());
+            shuffled.extend(rows[..rotation].iter().copied());
+            sort_records(&mut shuffled);
+            let got: Vec<_> = shuffled.iter().map(order_projection).collect();
+            assert_eq!(got, expected, "rotation by {rotation} changed the order");
+        }
+
+        let mut counts: Vec<u64> = rows.iter().map(|record| record.count).collect();
+        counts.sort_unstable();
+        let mut sorted_counts: Vec<u64> = sorted.iter().map(|record| record.count).collect();
+        sorted_counts.sort_unstable();
+        assert_eq!(sorted_counts, counts, "sorting must be a permutation");
+    }
 }

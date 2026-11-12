@@ -1,0 +1,17 @@
+# file	family	src	dst	sport	dport	proto	accept
+ipv4_tcp.bin	4	10.0.0.1	10.0.0.2	12345	80	6	1
+ipv4_udp.bin	4	10.0.0.1	10.0.0.2	5353	53	17	1
+vlan_ipv4_udp.bin	4	10.0.0.1	10.0.0.2	1000	2000	17	1
+qinq_ipv6_udp.bin	6	fd00::1	fd00::2	5000	53	17	1
+ipv6_tcp.bin	6	fd00::1	fd00::2	40000	443	6	1
+ipv4_frag_nonfirst.bin	4	10.0.0.1	10.0.0.2	0	0	17	1
+ipv4_frag_first.bin	4	10.0.0.1	10.0.0.2	4000	5000	17	1
+ipv4_truncated_l4.bin	4	10.0.0.1	10.0.0.2	0	0	6	1
+ipv6_ext_hopopts.bin	6	fd00::1	fd00::2	0	0	0	1
+truncated_eth.bin	-	-	-	0	0	0	0
+truncated_vlan.bin	-	-	-	0	0	0	0
+truncated_ipv4.bin	-	-	-	0	0	0	0
+truncated_ipv6.bin	-	-	-	0	0	0	0
+arp.bin	-	-	-	0	0	0	0
+ipv4_bad_ihl.bin	-	-	-	0	0	0	0
+ipv4_options_truncated.bin	-	-	-	0	0	0	0

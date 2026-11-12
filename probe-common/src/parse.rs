@@ -497,4 +497,76 @@ mod tests {
         assert_eq!(info.dst_port, 0);
     }
 
+    /// Directory holding the shared fixture frames and their index.
+    fn fixtures_dir() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../probe/tests/fixtures/frames")
+    }
+
+    /// Parses a textual address into the left-aligned 16-byte ABI form.
+    fn fixture_addr(family: u8, text: &str) -> [u8; 16] {
+        let mut addr = [0u8; 16];
+        if family == FAMILY_IPV4 {
+            let parsed: std::net::Ipv4Addr = text.parse().expect("IPv4 fixture address");
+            addr[..4].copy_from_slice(&parsed.octets());
+        } else {
+            let parsed: std::net::Ipv6Addr = text.parse().expect("IPv6 fixture address");
+            addr.copy_from_slice(&parsed.octets());
+        }
+        addr
+    }
+
+    /// Replays every row of `index.tsv` through [`parse_ip`].
+    ///
+    /// The same frames are reused by the future L3 replay, so the expected
+    /// values live in the table instead of being duplicated per test.
+    #[test]
+    fn u_parse_fixture_table_matches_the_index() {
+        let dir = fixtures_dir();
+        let index = std::fs::read_to_string(dir.join("index.tsv")).expect("read fixture index");
+        let mut seen = 0usize;
+
+        for raw in index.lines() {
+            let line = raw.trim_end_matches('\r');
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let cols: Vec<&str> = line.split('\t').collect();
+            assert_eq!(cols.len(), 8, "index row must have 8 columns: {line}");
+
+            let file = cols[0];
+            let bytes =
+                std::fs::read(dir.join(file)).unwrap_or_else(|err| panic!("read {file}: {err}"));
+            let parsed = parse_ip(&bytes[..]);
+
+            if cols[7] != "1" {
+                assert!(parsed.is_err(), "{file} must be rejected, got {parsed:?}");
+                seen += 1;
+                continue;
+            }
+
+            let info = parsed.unwrap_or_else(|err| panic!("{file} must parse, got {err:?}"));
+            let family: u8 = cols[1].parse().expect("family column");
+            assert_eq!(info.family, family, "{file}: family");
+            assert_eq!(info.src, fixture_addr(family, cols[2]), "{file}: src");
+            assert_eq!(info.dst, fixture_addr(family, cols[3]), "{file}: dst");
+            assert_eq!(
+                info.src_port,
+                cols[4].parse::<u16>().expect("sport"),
+                "{file}: sport"
+            );
+            assert_eq!(
+                info.dst_port,
+                cols[5].parse::<u16>().expect("dport"),
+                "{file}: dport"
+            );
+            assert_eq!(
+                info.protocol,
+                cols[6].parse::<u8>().expect("proto"),
+                "{file}: proto"
+            );
+            seen += 1;
+        }
+
+        assert_eq!(seen, 16, "fixture index must cover all 16 frames");
+    }
 }
