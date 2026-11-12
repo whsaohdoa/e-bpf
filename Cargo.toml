@@ -4,6 +4,7 @@ members = [
     "probe",
     "probe-common",
     "probe-ebpf",
+    "testkit",
     "xtask",
 ]
 # `xtask` stays out of the default members: `cargo build`/`cargo test` should

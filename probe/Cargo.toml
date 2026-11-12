@@ -5,6 +5,13 @@ edition.workspace = true
 
 license.workspace = true
 
+[features]
+default = []
+# Propagates to `probe-ebpf` (and, through `build.rs`, to the nested BPF build):
+# the data path shrinks AGG to 1024 entries so the e2e suite can drive the
+# overflow counter without manufacturing >131k distinct keys.
+small-maps = ["probe-ebpf/small-maps"]
+
 [dependencies]
 probe-common = { path = "../probe-common", features = ["user"] }
 
@@ -44,3 +51,8 @@ probe-ebpf = { path = "../probe-ebpf" }
 [[bin]]
 name = "probe"
 path = "src/main.rs"
+
+[dev-dependencies]
+# Raw frame sender, veth plumbing and the probe child wrapper for the privileged
+# e2e suite (`probe/tests/e2e.rs`).
+probe-testkit = { path = "../testkit" }

@@ -451,6 +451,7 @@ dependencies = [
  "log",
  "probe-common",
  "probe-ebpf",
+ "probe-testkit",
  "tokio",
 ]
 
@@ -470,6 +471,10 @@ dependencies = [
  "probe-common",
  "which 6.0.3",
 ]
+
+[[package]]
+name = "probe-testkit"
+version = "0.1.0"
 
 [[package]]
 name = "proc-macro2"
@@ -841,6 +846,9 @@ checksum = "d135d17ab770252ad95e9a872d365cf3090e3be864a34ab46f48555993efc904"
 [[package]]
 name = "xtask"
 version = "0.1.0"
+dependencies = [
+ "probe-testkit",
+]
 
 [[package]]
 name = "zmij"

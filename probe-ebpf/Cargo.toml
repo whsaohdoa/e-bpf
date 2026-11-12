@@ -9,6 +9,13 @@ probe-common = { path = "../probe-common" }
 aya-ebpf = { workspace = true }
 aya-log-ebpf = { workspace = true }
 
+[features]
+default = []
+# Shrinks the AGG map to 1024 entries so the e2e suite can exercise the
+# overflow counter (E-06) with a few thousand keys. Must be propagated by
+# `probe/build.rs`, whose nested cargo invocation does not inherit features.
+small-maps = []
+
 [build-dependencies]
 which = { workspace = true }
 

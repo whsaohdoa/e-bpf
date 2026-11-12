@@ -25,9 +25,20 @@ static SAMPLES: RingBuf = RingBuf::with_byte_size(256 * 1024, 0);
 #[map]
 static CONFIG: Array<ProbeConfig> = Array::with_max_entries(1, 0);
 
-/// Per-CPU aggregation map.  131072 keys; key/value are 56/32 bytes.
+/// Capacity of the per-CPU aggregation map.
+///
+/// The default is sized for Train 0 (131072 keys; key/value are 56/32 bytes).
+/// The `small-maps` feature shrinks it to 1024 entries so the e2e suite can
+/// drive `STATS_AGG_OVERFLOW` deterministically with a few thousand keys
+/// instead of manufacturing >131k distinct keys.
+#[cfg(not(feature = "small-maps"))]
+const AGG_MAX_ENTRIES: u32 = 131_072;
+#[cfg(feature = "small-maps")]
+const AGG_MAX_ENTRIES: u32 = 1024;
+
+/// Per-CPU aggregation map.
 #[map]
-static AGG: PerCpuHashMap<AggKey, AggValue> = PerCpuHashMap::with_max_entries(131_072, 0);
+static AGG: PerCpuHashMap<AggKey, AggValue> = PerCpuHashMap::with_max_entries(AGG_MAX_ENTRIES, 0);
 
 /// Per-CPU counters.  Indexes are the `STATS_*` constants in `probe-common`.
 #[map]

@@ -7,7 +7,9 @@
 //! | --- | --- |
 //! | `cargo xtask test [--layer l0\|l1\|l2\|all]` | unit, contract and in-process pipeline tests |
 //! | `cargo xtask bpf` | the BPF object build with the pinned nightly toolchain |
-//! | `cargo xtask e2e --legacy [--script <name>]` | the bash suites in `verification/` |
+//! | `cargo xtask e2e [--case <id>] [--jobs <n>]` | the privileged L3 driver in `probe/tests/e2e.rs` |
+//! | `cargo xtask e2e --legacy [--script <name>]` | the leftover bash suite (`run_perf.sh`) |
+//! | `cargo xtask send --iface <if>` | replay the fixture frame matrix through AF_PACKET |
 //! | `cargo xtask report` | the JUnit summary of the last `xtask test` run |
 //! | `cargo xtask soak --minutes <n>` | placeholder for the L4 soak run |
 //!
@@ -16,6 +18,7 @@
 //! eBPF loading path, which the e2e layer (not the unit layers) exercises.
 
 use std::{
+    collections::BTreeMap,
     env,
     path::{Path, PathBuf},
     process::{Command, ExitCode},
@@ -24,6 +27,10 @@ use std::{
 /// Integration test files that belong to the in-process pipeline layer rather
 /// than to the CLI contract layer.
 const PIPELINE_TESTS: [&str; 1] = ["pipeline"];
+
+/// Integration test files that need root and a throw-away veth pair. They are
+/// kept out of L1/L2 and only run through `cargo xtask e2e`.
+const E2E_TESTS: [&str; 1] = ["e2e"];
 
 /// Layers in the order a full run executes them: cheapest first, so a unit test
 /// failure is reported before the slower layers start.
@@ -50,6 +57,7 @@ fn dispatch() -> Result<ExitCode, String> {
         "test" => test(&rest),
         "bpf" => bpf(&rest),
         "e2e" => e2e(&rest),
+        "send" => send(&rest),
         "report" => report(),
         "soak" => soak(&rest),
         "-h" | "--help" | "help" => {
@@ -66,8 +74,10 @@ usage: cargo xtask <command>
 commands:
   test [--layer l0|l1|l2|all]   run the test layers (default: all)
   bpf                           build the eBPF object; nightly is the default toolchain
-  e2e --legacy [--script NAME]  run the bash suites in verification/ (needs /workspace)
-  e2e --case ID                 run one L3 case (arrives with the e2e driver)
+  e2e [--case ID] [--jobs N]    run the privileged L3 driver (E-01..E-07)
+  e2e --legacy [--script NAME]  run the leftover bash suite (verification/run_perf.sh)
+  send --iface IF [--frames D] [--count N] [--only accept|reject|all]
+                                replay the fixture frame matrix through AF_PACKET
   report                        summarise the JUnit report of the last test run
   soak --minutes N              placeholder for the L4 soak run";
 
@@ -187,7 +197,7 @@ fn integration_tests(layer: Layer) -> Result<Vec<String>, String> {
             continue;
         };
         // Files starting with `_` are shared helpers, not test targets.
-        if stem.starts_with('_') {
+        if stem.starts_with('_') || E2E_TESTS.contains(&stem) {
             continue;
         }
         let is_pipeline = PIPELINE_TESTS.contains(&stem);
@@ -291,32 +301,120 @@ fn junit_paths() -> Vec<PathBuf> {
 /// how `docker-compose.yml` mounts the repository into the dev container.
 const E2E_WORKSPACE: &str = "/workspace";
 
-const LEGACY_SCRIPTS: [&str; 4] = [
-    "run_e2e.sh",
-    "run_e2e_ipv6.sh",
-    "run_aggregation.sh",
-    "run_perf.sh",
-];
+/// Shell scripts still run by `cargo xtask e2e --legacy`.
+///
+/// The three assertion suites (`run_e2e.sh`, `run_e2e_ipv6.sh`,
+/// `run_aggregation.sh`) were deleted once `probe/tests/e2e.rs` covered the same
+/// ground in Rust; `run_perf.sh` stays because throughput numbers are not part
+/// of the e2e contract.
+const LEGACY_SCRIPTS: [&str; 1] = ["run_perf.sh"];
+
+/// Test function suffixes in `probe/tests/e2e.rs`, in execution order.
+const E2E_CASES: [&str; 7] = ["e01", "e02", "e03", "e04", "e05", "e06", "e07"];
+
+/// Cases that need the `small-maps` data path (AGG shrunk to 1024 entries):
+/// they assert on `agg_overflow`, which the default 131072 entry map cannot
+/// reach within a sane frame budget.
+const SMALL_MAPS_CASES: [&str; 1] = ["e06"];
+
+/// `E-01` / `e01` / `E-1` → `e01`, validated against [`E2E_CASES`].
+fn normalize_case(case: &str) -> Result<String, String> {
+    let normalized: String = case
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    let padded = if normalized.len() == 2 {
+        format!("{}0{}", &normalized[..1], &normalized[1..])
+    } else {
+        normalized.clone()
+    };
+    if E2E_CASES.contains(&padded.as_str()) {
+        Ok(padded)
+    } else {
+        Err(format!(
+            "unknown e2e case `{case}`: expected one of E-01..E-07\n\n{USAGE}"
+        ))
+    }
+}
 
 fn e2e(args: &[String]) -> Result<ExitCode, String> {
-    let legacy = args.iter().any(|a| a == "--legacy");
-    let case = flag_value(args, "--case")?;
-    let script = flag_value(args, "--script")?;
-
-    if !legacy {
-        return match case {
-            Some(case) => Err(format!(
-                "case `{case}` is not runnable yet: the L3 driver arrives with the e2e harness \
-                 (TEST-PLAN §6). Run the current bash suites with `cargo xtask e2e --legacy`."
-            )),
-            None => Err(
-                "nothing selected: pass `--legacy` for the bash suites in verification/, \
-                 or `--case <id>` once the L3 driver exists"
-                    .into(),
-            ),
-        };
+    if args.iter().any(|arg| arg == "--legacy") {
+        return e2e_legacy(args);
     }
 
+    let requested = flag_value(args, "--case")?;
+    let jobs = match flag_value(args, "--jobs")? {
+        Some(value) => value
+            .parse::<usize>()
+            .map_err(|_| format!("`--jobs` expects a whole number, got `{value}`"))?,
+        None => 4,
+    };
+    if jobs == 0 {
+        return Err("`--jobs` must be greater than 0".into());
+    }
+    let selected = match &requested {
+        Some(case) => vec![normalize_case(case)?],
+        None => E2E_CASES.map(str::to_owned).to_vec(),
+    };
+
+    // Two build configurations: the default object, and one whose AGG map is
+    // small enough to overflow. Each pass pins PROBE_BIN to the artifact it
+    // just built, so a case can never run against the wrong data path.
+    let (small, standard): (Vec<String>, Vec<String>) = selected
+        .iter()
+        .cloned()
+        .partition(|case| SMALL_MAPS_CASES.contains(&case.as_str()));
+
+    for (label, features, cases) in [
+        ("default build", Vec::new(), standard),
+        (
+            "small-maps build",
+            vec!["--features".to_owned(), "small-maps".to_owned()],
+            small,
+        ),
+    ] {
+        if cases.is_empty() {
+            continue;
+        }
+        let filters: Vec<String> = cases.iter().map(|case| format!("case_{case}")).collect();
+        run_e2e_pass(label, &features, &filters, jobs)?;
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Builds the data path with `features`, then runs the matching `#[ignore]`d
+/// cases of `probe/tests/e2e.rs` with `PROBE_BIN` pinned to that artifact.
+fn run_e2e_pass(
+    label: &str,
+    features: &[String],
+    filters: &[String],
+    jobs: usize,
+) -> Result<(), String> {
+    let mut build = vec!["build".to_owned(), "-p".to_owned(), "probe".to_owned()];
+    build.extend(features.iter().cloned());
+    run(cargo_command(&build), &format!("probe build ({label})"))?;
+
+    let bin = workspace_root().join("target/debug/probe");
+    let mut args = vec![
+        "test".to_owned(),
+        "-p".to_owned(),
+        "probe".to_owned(),
+        "--test".to_owned(),
+        "e2e".to_owned(),
+    ];
+    args.extend(features.iter().cloned());
+    args.extend(["--".to_owned(), "--ignored".to_owned()]);
+    args.extend(["--test-threads".to_owned(), jobs.to_string()]);
+    args.extend(filters.iter().cloned());
+
+    let mut command = cargo_command(&args);
+    command.env("PROBE_BIN", &bin);
+    run(command, &format!("e2e ({label}: {})", filters.join(", ")))
+}
+
+fn e2e_legacy(args: &[String]) -> Result<ExitCode, String> {
+    let script = flag_value(args, "--script")?;
     let workspace = Path::new(E2E_WORKSPACE);
     if !workspace.join("probe").is_dir() {
         return Err(format!(
@@ -347,6 +445,73 @@ fn e2e(args: &[String]) -> Result<ExitCode, String> {
             "no script matched `--script {}`",
             script.unwrap_or_default()
         ));
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+// -------------------------------------------------------------------- send
+
+/// Replays the fixture frame matrix through an AF_PACKET socket. Used by the
+/// e2e suite for one-off injections and by developers to reproduce a case by
+/// hand: `cargo xtask send --iface veth1a --count 10 --only accept`.
+fn send(args: &[String]) -> Result<ExitCode, String> {
+    use probe_testkit::{
+        frames::{FrameSpec, FrameTable},
+        raw::FrameSender,
+    };
+
+    let iface =
+        flag_value(args, "--iface")?.ok_or_else(|| "`send` needs `--iface <name>`".to_owned())?;
+    let dir = flag_value(args, "--frames")?.map_or_else(probe_testkit::frames_dir, PathBuf::from);
+    let count: usize = match flag_value(args, "--count")? {
+        Some(value) => value
+            .parse()
+            .map_err(|_| format!("`--count` expects a whole number, got `{value}`"))?,
+        None => 1,
+    };
+    let only = flag_value(args, "--only")?.unwrap_or_else(|| "all".to_owned());
+
+    let table = FrameTable::load(&dir).map_err(|e| e.to_string())?;
+    let selected: Vec<&FrameSpec> = match only.as_str() {
+        "all" => table.specs.iter().collect(),
+        "accept" => table.accepted().collect(),
+        "reject" => table.rejected().collect(),
+        other => {
+            return Err(format!(
+                "`--only` expects accept, reject or all, got `{other}`"
+            ));
+        }
+    };
+    if selected.is_empty() {
+        return Err(format!(
+            "no frame matched `--only {only}` in {}",
+            dir.display()
+        ));
+    }
+
+    // Armed here and disarmed right after the burst, so the printed count is the
+    // exact number of frames the kernel accepted.
+    let sender =
+        FrameSender::open(&iface).map_err(|e| format!("open AF_PACKET on `{iface}`: {e}"))?;
+    let mut per_file: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut sent = 0usize;
+    for _ in 0..count {
+        for spec in &selected {
+            sender
+                .send(&spec.bytes)
+                .map_err(|e| format!("send {}: {e}", spec.file))?;
+            *per_file.entry(spec.file.as_str()).or_default() += 1;
+            sent += 1;
+        }
+    }
+    sender.close();
+
+    println!(
+        "xtask: sent {sent} frame(s) from {} fixture(s) on `{iface}`",
+        selected.len()
+    );
+    for (file, frames) in per_file {
+        println!("  {frames:>6}  {file}");
     }
     Ok(ExitCode::SUCCESS)
 }

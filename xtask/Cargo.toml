@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
-# Deliberately dependency free: the entry point only shells out to `cargo`, so it
-# can run before (and without) the probe dependencies being fetchable.
+# No registry dependencies on purpose: the entry point only shells out to
+# `cargo`, so it can run before (and without) the probe dependencies being
+# fetchable. `probe-testkit` is a local path dependency and stays dependency
+# free itself, which keeps that property intact.
 [dependencies]
+probe-testkit = { path = "../testkit" }

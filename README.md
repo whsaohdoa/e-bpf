@@ -405,7 +405,7 @@ item `panic_impl`”。真实 eBPF 构建使用 `--target bpfel-unknown-none` +
 | 层 | 命令 | 内容 |
 |---|---|---|
 | L0 | `cargo xtask test --layer l0` | `aggregate` / `sink` / `ports` 的纯逻辑单测与 ABI 布局 |
-| L1 | `cargo xtask test --layer l1` | CLI 契约（`probe/tests/` 里非 `pipeline` 的文件，当前为空） |
+| L1 | `cargo xtask test --layer l1` | CLI 契约（`probe/tests/` 里非 `pipeline`、非 `e2e` 的文件，当前为空） |
 | L2 | `cargo xtask test --layer l2` | 进程内管线 P-01…P-16：假 AGG map、可脚本化 ringbuf、内存 sink、注入时钟 |
 
 `cargo xtask test`（不带 `--layer`）按 L0→L1→L2 顺序跑全部；优先用 `cargo nextest`
@@ -416,16 +416,29 @@ item `panic_impl`”。真实 eBPF 构建使用 `--target bpfel-unknown-none` +
 分层测试的落地细节、L2 抓出的两个 bug、覆盖率实测与未完成项见
 `verification/REPORT-layered-tests.md`。
 
-真机部分仍是下面这些脚本，在特权容器里可用 `cargo xtask e2e --legacy` 一次跑完：
+真机层（L3）是 Rust 驱动：`cargo xtask e2e` 在特权容器里跑 `probe/tests/e2e.rs` 的
+E-01…E-07，默认 `-j 4`，单次全绿约 10-20 秒（预算 6 分钟）。每个用例自建唯一命名的
+veth 对、自建 `target/e2e/<case>/` 产物目录，`Drop` 负责清理；断言全在 Rust 里，没有
+固定 `sleep`（需要时序时用 `clock_gettime(CLOCK_MONOTONIC)` 对齐窗口边界），也没有
+`exit "$FAIL"` 这种会截断的退出码。
 
-仓库根目录（挂载为容器内 `/workspace`）的 `verification/` 下有可重复执行的脚本，全部
-使用真实 veth + netns，不做 mock：
+| 用例 | 覆盖内容 |
+|---|---|
+| E-01 | attach 生命周期：`bpftool net` 先无后有、`run_cnt` 增长、SIGTERM 后无残留 |
+| E-02 | 100 帧落进单个 200 ms 窗口：`Σcount=100`、`packets_total=100`、无迟到/畸形 |
+| E-03 | 16 条固定帧矩阵逐条对照 `tests/fixtures/frames/index.tsv`（9 收 7 拒） |
+| E-04 | SIGTERM 打断未关闭窗口：写出 `window_complete=0` 的 partial 行，统计完整 |
+| E-05 | `CONFIG` 版本不匹配：`STATS[CONFIG_MISSING]` 累加，仍 `XDP_PASS`、计数不丢 |
+| E-06 | `--features small-maps`（AGG=1024）+ 1100 个键：`agg_overflow>0` 且键数守恒 |
+| E-07 | 两个 probe 分挂 veth 两端共写一份 CSV（`--append`）：一条 header、两个 iface、无错行 |
+
+定帧发送器由 `cargo xtask send --iface IF [--count N]` 暴露，与用例共用
+`testkit` 里的 AF_PACKET 实现。真机验证的证据与结论见 `verification/REPORT-e2e.md`。
+
+性能对比仍是 shell 脚本（`cargo xtask e2e --legacy`）：
 
 | 脚本 | 覆盖内容 |
 |---|---|
-| `verification/run_e2e.sh` | IPv4 回归：attach、双向 ping、`run_cnt`、`--append`、VLAN、清理后无残留 |
-| `verification/run_e2e_ipv6.sh` | IPv6 端到端：ULA、`protocol=58`、IPv6 over VLAN、混合地址 |
-| `verification/run_aggregation.sh` | 聚合验收 A2–A7：3 个 ICMP 一行、前缀聚合、泛洪 Σcount、相邻窗口、SIGINT/SIGTERM partial、`late_dropped=0` |
 | `verification/run_perf.sh` | 新旧实现性能对比（`MODE=old` / `MODE=new`）：发送数、样本行/秒、Σcount 误差、用户态 CPU%、`kernel_dropped` |
 
 聚合改造的完整证据与结论见 `verification/REPORT-aggregation.md`；早期逐包实现的报告

@@ -21,8 +21,8 @@
 //! [`AggSink`] implementation and a new arm in the `create_*` functions.
 //!
 //! Both writers always keep the file open in `O_APPEND` mode: two probes may
-//! write the same CSV concurrently (one per veth end, as in
-//! `verification/run_e2e_ipv6.sh`).  Without `O_APPEND` a truncating writer
+//! write the same CSV concurrently (one per veth end, as reproduced by e2e case
+//! E-07 in `probe/tests/e2e.rs`).  Without `O_APPEND` a truncating writer
 //! keeps its own file offset and would silently overwrite rows appended by the
 //! other process.  `--append` only controls whether the file is emptied once on
 //! startup; the header is (re)written whenever the file is empty.
@@ -188,7 +188,7 @@ fn open_append(path: &Path, append: bool) -> Result<BufWriter<File>> {
 /// checked and written.
 ///
 /// Two probes may share one CSV (`--append` on both ends of a veth pair, see
-/// `verification/run_e2e_ipv6.sh`).  Without the lock both open an empty file,
+/// e2e case E-07).  Without the lock both open an empty file,
 /// both see length 0 and both write a header, so the file starts with two header
 /// rows and every row counter is off by one.
 #[cfg(unix)]
@@ -357,7 +357,10 @@ impl AggSink for AggCsvSink {
                 format_direction(key.direction),
                 format_src_prefix(key, &self.config),
                 format_dst_addr(key),
-                key.dst_port,
+                // The ABI carries the L4 ports as they appear on the wire
+                // (network byte order), so the CSV needs the `from_be` decode —
+                // the same one `SampleEvent` gets above.
+                u16::from_be(key.dst_port),
                 key.protocol,
                 format_action(key.action),
                 key.rule_id,
@@ -558,7 +561,7 @@ mod tests {
             family: FAMILY_IPV4,
             src_prefix: ipv4_bytes(10, 99, 0, 0),
             dst_addr: ipv4_bytes(10, 99, 0, 1),
-            dst_port: 8080,
+            dst_port: 8080u16.to_be(),
             protocol: 6,
             action: ACTION_PASS,
             reason: 0,
@@ -613,7 +616,7 @@ mod tests {
     }
 
     /// Regression test for two probes writing one CSV: one truncating instance
-    /// plus one `--append` instance, as done by verification/run_e2e_ipv6.sh.
+    /// plus one `--append` instance, as done by e2e case E-07.
     /// The truncating writer must not clobber rows the appending writer already
     /// flushed (it used to seek back to its own offset).
     #[test]
