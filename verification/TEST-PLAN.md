@@ -250,7 +250,7 @@ let (samples, aggs, stats) = h.finish();   // 归一化后可做 insta 快照
 L2 实际共 19 条：P-01..P-16 之外还有 3 条守卫（窗口时间戳渲染、IPv6 family、
 BLOCK 键的 16 列 schema），全部毫秒级、不加载 eBPF。
 
-### 5.4 L3 真机 e2e（计划 7 条全 Rust；现状仍是 4 个 bash 脚本，Rust driver 属 S4）
+### 5.4 L3 真机 e2e（7 条，全 Rust；S4 已落地）
 
 | id | 场景 | 断言 | 覆盖 |
 |---|---|---|---|
@@ -258,7 +258,7 @@ BLOCK 键的 16 列 schema），全部毫秒级、不加载 eBPF。
 | E-02 | IPv4 定帧 100 包（AF_PACKET，单窗口 200 ms） | `Σcount=100`、`packets_total=100`、无 late/malformed | A2 A4 |
 | E-03 | 帧矩阵端到端（`index.tsv` 全量） | 每帧对应 CSV 行的 family/地址/端口/proto 与 fixture 期望一致 | A12 新增 |
 | E-04 | SIGTERM 未关闭窗口 | partial 行 + stats 完整 + flush 成功 | A7 |
-| E-05 | `bpftool map delete name CONFIG` 后发包 | `STATS_CONFIG_MISSING>0`、**仍 XDP_PASS、count 正常** | A13 新增 |
+| E-05 | `CONFIG` 版本被改成不可识别值后发包 | `STATS_CONFIG_MISSING` 累加、**仍 XDP_PASS、count 正常** | A13 新增 |
 | E-06 | `small-maps` 特性构建（AGG=1024）+ 1100 个不同 key | `agg_overflow>0`、已接受 key 的 count 守恒、无丢包 | A13 新增 |
 | E-07 | 双端并发 `--append`（veth 两端各一 probe） | 一份 CSV 两种 iface、行数守恒、无交错损坏 | A8 |
 
@@ -374,7 +374,7 @@ jobs:
 | **S1 基建** | `verification/` 纳入 git（或独立仓库）；`cargo xtask` 骨架；nextest + llvm-cov + JUnit；删 `sudo -E` runner；修 G11；CI fast/bpf 两档；现有 4 个 bash 挂进 `xtask e2e --legacy` | 绿 PR gate | 无 | 1.5 | PR 上有 <2 min 的 L0 gate；`cargo test` 不再需要 sudo |
 | **S2 管线化** | E1 端口化 + L2 Harness + P-01..P-16 | `probe/tests/pipeline.rs` + 16 条用例 | S1 | 3 | A2/A3/A6/A7 的断言在 2 s 内跑完；`pipeline.rs` 行覆盖 ≥85%（`main.rs` 已拆成 8 行壳，口径见 §8） |
 | **S3 解析器** | E2 下沉 + fixture 帧表 + U-PREFIX/U-KEY + C-SCHEMA | `probe-common/src/parse.rs`、`probe/tests/fixtures/frames/`、`probe/tests/csv_schema.rs` | S2 | 3.5 | 双层 VLAN/非首分片/截断各有单测；eBPF 目标仍可 attach |
-| **S4 真机** | E3 定帧发送器 + E5 Rust driver + E-01..E-07；删除 3 个 bash 断言脚本 | `probe/tests/e2e_*.rs` | S3 | 4 | e2e < 6 min 且可 `-j` 并行；无固定 sleep |
+| **S4 真机** | E3 定帧发送器 + E5 Rust driver + E-01..E-07；删除 3 个 bash 断言脚本 | `probe/tests/e2e.rs`、`testkit/`、`xtask send` | S3 | 4 | e2e < 6 min 且可 `-j` 并行；无固定 sleep |
 | **S5 长稳与报告** | L4 + `xtask report`（JUnit→REPORT.md）+ `small-maps` 特性 + flake 看板 | 自动生成的 `REPORT-*.md` | S4 | 2.5 | A1–A15 全部有 test id 且报告自动生成；抖动 5/5 |
 
 依赖关系是严格的（E2 依赖 E1 的 fixture 复用；E3 依赖 E2 的 `index.tsv`），但 **S1 与 S2 可以并行开工**：S1 改基础设施，S2 只碰 `probe/src`。
@@ -382,7 +382,11 @@ jobs:
 **进度（2026-11-12）**：S1、S2 已落地，结果与偏差见 `REPORT-layered-tests.md`；
 S3 已落地（分支 `test/test-plan-s3`），`parse.rs` 行覆盖 99.1%、`probe-common` 99.2%，
 整体 93.2%，`run_e2e.sh` 在特权容器 PASS，结果与偏差见 `REPORT-parser.md`。
-S4 起未开工。计划正文已按实测对齐：§3 各层用例数、§4 E2 的 `Result` 签名与
+S4 已落地（分支 `test/test-plan-s4`）：E-01..E-07 全 Rust、`cargo xtask e2e` 默认
+`-j 4` 全绿且约 10-20 s，`run_e2e.sh`/`run_e2e_ipv6.sh`/`run_aggregation.sh` 已删除，
+只剩 `run_perf.sh` 走 `--legacy`；S4 抓到的两个产品 bug（L4 端口字节序、
+启动期 SIGTERM 竞态）与偏差见 `REPORT-e2e.md`。
+S5 未开工。计划正文已按实测对齐：§3 各层用例数、§4 E2 的 `Result` 签名与
 `take::<N>` 方案、§5.1/§5.2 的用例与位置、§8 的 S3 覆盖率；历史偏差另记在
 `REPORT-parser.md` §5。
 
@@ -397,7 +401,7 @@ S4 起未开工。计划正文已按实测对齐：§3 各层用例数、§4 E2 
 
 - [ ] 每个 A1–A15 验收项都能用一个 `test id` 精确定位，且 `cargo xtask report` 自动生成证据。
 - [ ] `cargo xtask test` 在无 root、无网络的干净机器上 < 30 s 全绿（覆盖 L0–L2）。
-- [ ] `cargo xtask e2e` 在特权容器内 < 6 min 全绿，可 `-j 4` 并行。
+- [x] `cargo xtask e2e` 在特权容器内 < 6 min 全绿，可 `-j 4` 并行（实测 10-20 s）。
 - [ ] 仓库内 0 处固定 `sleep`、0 处 `exit $FAIL`、0 处 `sudo` in CI。
 - [ ] 人为回退任一 bug（例如把 `window_complete` 恒置 1、把 `late_dropped` 恒置 0），必须有测试变红——这是"测试有效"的唯一证明，用 `cargo mutants` 或手工 mutation 抽查。
 - [ ] 抖动：连续 20 次 CI e2e 无失败（flake 率 < 1%）。

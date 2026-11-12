@@ -11,6 +11,7 @@ fn main() -> anyhow::Result<()> {
     // PROBE_EBPF_PREBUILT at it (see scripts/ci/coverage.sh). aya-build copies the
     // object to `$OUT_DIR/<target name>`, which is what main.rs includes.
     println!("cargo:rerun-if-env-changed=PROBE_EBPF_PREBUILT");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_SMALL_MAPS");
     if let Some(prebuilt) = std::env::var_os("PROBE_EBPF_PREBUILT") {
         let prebuilt = std::path::PathBuf::from(prebuilt);
         let out_dir = std::path::PathBuf::from(std::env::var_os("OUT_DIR").context("OUT_DIR")?);
@@ -32,12 +33,22 @@ fn main() -> anyhow::Result<()> {
         manifest_path,
         ..
     } = ebpf_package;
+    // aya-build runs its own cargo invocation for the data path, so a feature
+    // enabled on this package does not reach it: forward it explicitly. The
+    // `small-maps` feature shrinks the AGG map so the e2e suite can exercise the
+    // overflow counter (E-06) with a handful of keys.
+    let ebpf_features: Vec<&str> = if std::env::var_os("CARGO_FEATURE_SMALL_MAPS").is_some() {
+        vec!["small-maps"]
+    } else {
+        Vec::new()
+    };
     let ebpf_package = aya_build::Package {
         name: name.as_str(),
         root_dir: manifest_path
             .parent()
             .ok_or_else(|| anyhow!("no parent for {manifest_path}"))?
             .as_str(),
+        features: &ebpf_features,
         ..Default::default()
     };
     aya_build::build_ebpf([ebpf_package], Toolchain::default())

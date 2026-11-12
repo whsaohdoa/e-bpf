@@ -157,6 +157,12 @@ pub fn parse_ip(p: &(impl Pkt + ?Sized)) -> Result<L3Info, ParseError> {
 ///
 /// A missing/truncated L4 header yields `(0, 0)` instead of rejecting the
 /// packet: the aggregate still counts it.
+///
+/// The returned `u16` keeps the wire bytes as they are (`from_ne_bytes`), which is
+/// what the ABI documents ("network byte order"): user space decodes the port
+/// with `u16::from_be`.  Reading them with `from_be_bytes` here would hand user
+/// space a host-order port and every consumer that follows the ABI would then
+/// print a byte-swapped value.
 #[inline(always)]
 fn parse_ports(p: &(impl Pkt + ?Sized), l4_offset: usize, protocol: u8) -> (u16, u16) {
     if protocol != IPPROTO_TCP && protocol != IPPROTO_UDP {
@@ -164,8 +170,8 @@ fn parse_ports(p: &(impl Pkt + ?Sized), l4_offset: usize, protocol: u8) -> (u16,
     }
     match take::<4>(p, l4_offset) {
         Some(ports) => (
-            u16::from_be_bytes([ports[0], ports[1]]),
-            u16::from_be_bytes([ports[2], ports[3]]),
+            u16::from_ne_bytes([ports[0], ports[1]]),
+            u16::from_ne_bytes([ports[2], ports[3]]),
         ),
         None => (0, 0),
     }
@@ -326,8 +332,8 @@ mod tests {
         assert_eq!(info.src[..4], [10, 0, 0, 1]);
         assert_eq!(info.dst[..4], [10, 0, 0, 2]);
         assert_eq!(info.src[4..], [0u8; 12]);
-        assert_eq!(info.src_port, 12345);
-        assert_eq!(info.dst_port, 80);
+        assert_eq!(u16::from_be(info.src_port), 12345);
+        assert_eq!(u16::from_be(info.dst_port), 80);
         assert_eq!(info.protocol, IPPROTO_TCP);
     }
 
@@ -344,8 +350,8 @@ mod tests {
         assert_eq!(info.family, FAMILY_IPV6);
         assert_eq!(info.src, src);
         assert_eq!(info.dst, dst);
-        assert_eq!(info.src_port, 5000);
-        assert_eq!(info.dst_port, 53);
+        assert_eq!(u16::from_be(info.src_port), 5000);
+        assert_eq!(u16::from_be(info.dst_port), 53);
         assert_eq!(info.protocol, IPPROTO_UDP);
     }
 
@@ -399,8 +405,8 @@ mod tests {
             &ports(4000, 5000),
         ));
         let info = parse_ip(&frame[..]).expect("first fragment is accepted");
-        assert_eq!(info.src_port, 4000);
-        assert_eq!(info.dst_port, 5000);
+        assert_eq!(u16::from_be(info.src_port), 4000);
+        assert_eq!(u16::from_be(info.dst_port), 5000);
     }
 
     #[test]
@@ -550,12 +556,12 @@ mod tests {
             assert_eq!(info.src, fixture_addr(family, cols[2]), "{file}: src");
             assert_eq!(info.dst, fixture_addr(family, cols[3]), "{file}: dst");
             assert_eq!(
-                info.src_port,
+                u16::from_be(info.src_port),
                 cols[4].parse::<u16>().expect("sport"),
                 "{file}: sport"
             );
             assert_eq!(
-                info.dst_port,
+                u16::from_be(info.dst_port),
                 cols[5].parse::<u16>().expect("dport"),
                 "{file}: dport"
             );

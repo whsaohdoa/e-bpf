@@ -156,6 +156,16 @@ pub fn main() -> ExitCode {
 async fn run(opt: &Opt, requested: ProbeConfig) -> Result<Summary> {
     raise_memlock();
 
+    // Shutdown handlers are installed before anything is loaded or attached: a
+    // `kill`/`systemctl stop` that lands during startup must still take the
+    // draining path instead of killing the process with the default disposition
+    // and losing the userspace buffers.
+    let ctrl_c = signal::ctrl_c();
+    tokio::pin!(ctrl_c);
+    // Handle SIGTERM as well, so `kill`/container stop still drains and flushes
+    // instead of losing the userspace buffers.
+    let mut sigterm = unix_signal(SignalKind::terminate()).context("install SIGTERM handler")?;
+
     // The object is embedded at build time and always comes from the same build
     // as this binary, so no ABI version handshake is needed.
     let mut ebpf = Ebpf::load(aya::include_bytes_aligned!(concat!(
@@ -201,12 +211,6 @@ async fn run(opt: &Opt, requested: ProbeConfig) -> Result<Summary> {
     scan_tick.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
     let mut metrics_tick = time::interval(METRICS_PERIOD);
     metrics_tick.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
-
-    let ctrl_c = signal::ctrl_c();
-    tokio::pin!(ctrl_c);
-    // Handle SIGTERM as well, so `kill`/container stop still drains and flushes
-    // instead of losing the userspace buffers.
-    let mut sigterm = unix_signal(SignalKind::terminate()).context("install SIGTERM handler")?;
 
     // Duration of the most recent periodic scan, in milliseconds.
     let mut last_scan_ms = 0u64;
