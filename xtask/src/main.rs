@@ -145,15 +145,17 @@ fn test(args: &[String]) -> Result<ExitCode, String> {
 fn run_layer(layer: Layer, nextest: bool) -> Result<(), String> {
     match layer {
         Layer::L0 => {
-            // `probe` and `probe-common` are the default members; naming them
-            // explicitly keeps the layer identical when a test file is added to
-            // another member later.
+            // `probe`, `probe-common` and `agent` own the unit tests; naming
+            // them explicitly keeps the layer identical when a test file is
+            // added to another member later.
             let mut args = runner_args(nextest, layer)?;
             args.extend([
                 "-p".into(),
                 "probe".into(),
                 "-p".into(),
                 "probe-common".into(),
+                "-p".into(),
+                "agent".into(),
             ]);
             args.push("--lib".into());
             run(cargo_command(&args), layer.describe())
