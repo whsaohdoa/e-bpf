@@ -119,6 +119,12 @@ Rust 里，没有固定 `sleep`（需要对齐窗口边界时用 `clock_gettime(
 - **覆盖率不是门禁**：`scripts/ci/coverage.sh` 目前只产 `target/lcov.info` 并上传，
   `COVERAGE_MIN_LINES` 未设，`main.rs`/`app.rs` 被排除。
 
+CI 怎么分工（`.github/workflows/ci.yml`）：`changes` 用 paths-filter 判断这次改动落在哪一半仓库，
+`fast`（fmt/clippy/L0–L2/doc/coverage）只在 Rust 相关路径变化时跑，`bpf` 的范围更窄
+（`probe-ebpf/**`、`probe-common/**`、`Cargo.*`、`rust-toolchain*`、`xtask/**`），`gate` **恒执行**，
+把 skipped 视作通过——分支保护只需要求 `gate` 一个检查。改 `control-center/**` 走
+`control-center.yml`，不触发 Rust 侧；`workflow_dispatch` 视为「全部改过」，所有 job 都跑。
+
 ## 4. 代码地图
 
 ```
@@ -165,7 +171,10 @@ bash control-center/Makefile             # make up/smoke/p95/audit-check/migrate
 - **宿主 JDK 是 17，项目要 21**（`app/pom.xml:21`）：直接在宿主 `mvn package` 会因 target 21 失败，
   用 `make test`（内部 `docker run maven:3.9-eclipse-temurin-21`）或 `scripts/*.sh`。
 - 宿主没有 `make`，Windows 下用 Git Bash 直接调 `scripts/*.sh`。
-- 该目录**目前没有 CI**：仓库只有 Rust 的 `ci.yml`/`image.yml`，`mvn`/`npm build` 尚未在流水线里跑过。
+- 该目录有自己的 workflow `.github/workflows/control-center.yml`：只改 `control-center/**` 时跑
+  `mvn -B -ntp -DskipTests package`、`npm ci && npm run build`、`docker compose config -q`、
+  `kubectl kustomize deploy/k3d/k8s` 与 `bash -n scripts/*.sh`；四个镜像的 `docker build` 与
+  k3d 起集群**不在** CI 里跑，仍在本地 `scripts/*.sh`。
 
 ## 7. 文档索引
 
@@ -177,4 +186,4 @@ bash control-center/Makefile             # make up/smoke/p95/audit-check/migrate
 | S4 真机 e2e 证据 | `verification/REPORT-e2e.md` |
 | 聚合验收证据（A2–A7） | `verification/REPORT-aggregation.md` |
 | 控制中心边界、部署、迁移 | `control-center/README.md` |
-| CI 与工具链 | `.github/workflows/ci.yml`、`scripts/ci/*.sh` |
+| CI 与工具链 | `.github/workflows/ci.yml`、`control-center.yml`、`image.yml`、`scripts/ci/*.sh` |

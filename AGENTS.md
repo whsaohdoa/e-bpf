@@ -73,7 +73,8 @@ cargo xtask soak --minutes N             # 占位，未实现
 - 入口文档：`control-center/README.md`（四个镜像的边界、拓扑端口、compose/k3d、Liquibase 双库、
   审计表 append-only、“已经有的 / 还没有的”清单）。**先读它再动手**，那里的“还没有的”是刻意声明的范围，不是 TODO 遗漏。
 - 构建：`bash control-center/scripts/up.sh` / `smoke.sh` / `k3d-up.sh`，或 `make`（宿主无 make 时用 Git Bash）。
-- CI 现状：**没有**。仓库只有 Rust 的 `ci.yml`/`image.yml`，`mvn`/`npm build` 未在流水线里跑过。
+- CI：`.github/workflows/control-center.yml`（`mvn package` + `vite build` + compose/kustomize 静态校验），
+  Rust 侧的 `ci.yml` 不会因为改这里而跑。
 - 与 Rust 侧的关系：两者尚未接线，probe 不向控制中心上报（E8 未落地）。
 
 ## 7. 文档索引

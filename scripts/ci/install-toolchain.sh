@@ -49,6 +49,8 @@
 #   LLVM_MIRROR                  base URL of an apt.llvm.org mirror; unset
 #                                means "try apt.llvm.org, then TUNA"
 #   LLVM_GPG_KEY_URL             explicit archive key URL (optional)
+#   INSTALL_TEST_TOOLING=1       set to 0 to skip cargo-nextest and
+#                                cargo-llvm-cov (the `bpf` CI job only builds)
 #
 # Supported platforms: Ubuntu/Debian (apt). The runner needs network access to
 # the mirrors and needs apt to work (root, or passwordless sudo).
@@ -62,6 +64,9 @@ BPF_LINKER_VERSION="${BPF_LINKER_VERSION:-0.12.0}"
 BPF_LINKER_SOURCE="${BPF_LINKER_SOURCE:-0}"
 RUST_VERSION="${RUST_VERSION:-stable}"
 RUST_NIGHTLY="${RUST_NIGHTLY:-nightly-2026-11-01}"
+# The bpf job only builds the object; nextest/llvm-cov are two `cargo install`
+# runs it would never use. Set to 0 there (see .github/workflows/ci.yml).
+INSTALL_TEST_TOOLING="${INSTALL_TEST_TOOLING:-1}"
 LLVM_VERSION="${LLVM_VERSION:-23}"
 LLVM_MIRROR="${LLVM_MIRROR:-}"
 LLVM_GPG_KEY_URL="${LLVM_GPG_KEY_URL:-}"
@@ -242,11 +247,15 @@ log "test tooling: cargo-nextest, cargo-llvm-cov"
 # Installed before bpf-linker on purpose: these come from crates.io and have no
 # exotic dependencies, so a failure in the bpf-linker step below cannot leave the
 # runner without them.
-if ! command -v cargo-nextest >/dev/null 2>&1; then
-    cargo install cargo-nextest --locked
-fi
-if ! command -v cargo-llvm-cov >/dev/null 2>&1; then
-    cargo install cargo-llvm-cov --locked
+if [ "${INSTALL_TEST_TOOLING}" = "0" ]; then
+    log "test tooling: skipped (INSTALL_TEST_TOOLING=0)"
+else
+    if ! command -v cargo-nextest >/dev/null 2>&1; then
+        cargo install cargo-nextest --locked
+    fi
+    if ! command -v cargo-llvm-cov >/dev/null 2>&1; then
+        cargo install cargo-llvm-cov --locked
+    fi
 fi
 
 # --------------------------------------------------------------------------
@@ -444,4 +453,7 @@ if ! command -v bpf-linker >/dev/null 2>&1; then
     exit 1
 fi
 
-log "installed: $(rustc --version) | $(bpf-linker --version) | $(cargo nextest --version) | $(cargo llvm-cov --version)"
+log "installed: $(rustc --version) | $(bpf-linker --version)"
+if [ "${INSTALL_TEST_TOOLING}" != "0" ]; then
+    log "test tooling: $(cargo nextest --version) | $(cargo llvm-cov --version)"
+fi

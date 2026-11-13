@@ -1,12 +1,20 @@
 name: CI
 
-# Two gates:
-#   fast — formatting, clippy and the three host test layers (L0 unit, L1 CLI
-#          contract, L2 in-process pipeline). No privileges, no kernel, under
-#          two minutes after the cache is warm.
-#   bpf  — the eBPF object compiles for `bpfel-unknown-none` with the pinned
-#          nightly toolchain. This is the only job that needs LLVM and
-#          bpf-linker for a build that is not a side effect of the host build.
+# Three jobs produce the status, one job (`gate`) decides it:
+#   changes — which half of the repo this push/PR actually touched (paths-filter)
+#   fast    — formatting, clippy and the three host test layers (L0 unit, L1 CLI
+#             contract, L2 in-process pipeline). No privileges, no kernel, under
+#             two minutes after the cache is warm.
+#   bpf     — the eBPF object compiles for `bpfel-unknown-none` with the pinned
+#             nightly toolchain. This is the only job that needs LLVM and
+#             bpf-linker for a build that is not a side effect of the host build.
+#
+# Why `changes` and `gate` instead of workflow-level `paths:`: the repository now
+# holds two independently runnable projects (`probe/` here, `control-center/` in
+# its own workflow). A `paths:` filter on the trigger would never report a status
+# for a PR that misses it, which leaves a required check pending forever. So the
+# workflow always starts, the expensive jobs skip themselves, and `gate` always
+# runs and turns "skipped" into a green status.
 #
 # The e2e gate (privileged container, real kernel) stays on `main` and arrives
 # with the L3 driver in stage S3, see verification/TEST-PLAN.md.
@@ -15,6 +23,11 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: read
+  # `dorny/paths-filter` lists a PR's changed files through the REST API.
+  pull-requests: read
 
 concurrency:
   group: probe-ci-${{ github.ref }}
@@ -26,8 +39,62 @@ env:
   UBUNTU_MIRROR: https://mirrors.tuna.tsinghua.edu.cn/ubuntu
 
 jobs:
+  changes:
+    name: changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      bpf: ${{ steps.filter.outputs.bpf }}
+    steps:
+      # Full history so the filter can diff a `push` range locally as well.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # `rust` is "anything the host build/tests read"; `bpf` is the narrower set
+      # that can change the object: the data-path crate, the shared ABI, the
+      # pinned toolchain and the build script that drives it.
+      # The only third-party action in this file besides the GitHub ones. If the
+      # supply-chain policy changes, pin it to a commit SHA.
+      - name: Detect changed paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            rust:
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain*'
+              - 'rustfmt.toml'
+              - 'clippy.toml'
+              - '.cargo/**'
+              - '.config/**'
+              - 'probe/**'
+              - 'probe-common/**'
+              - 'probe-ebpf/**'
+              - 'testkit/**'
+              - 'xtask/**'
+              - 'scripts/ci/**'
+              - 'Dockerfile.ci'
+              - '.github/workflows/ci.yml'
+            bpf:
+              - 'probe-ebpf/**'
+              - 'probe-common/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain*'
+              - '.cargo/**'
+              - 'xtask/**'
+              - 'scripts/ci/**'
+              - '.github/workflows/ci.yml'
+
   fast:
     name: fast (fmt, clippy, L0-L2)
+    needs: changes
+    # `workflow_dispatch` means "run everything": a manual run has no diff to
+    # filter on, so treat it as if every path changed.
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -100,6 +167,8 @@ jobs:
 
   bpf:
     name: bpf object
+    needs: changes
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.bpf == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -118,7 +187,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-bpf-
 
+      # This job never runs nextest or llvm-cov, so it does not pay for their
+      # `cargo install` on a cold cache.
       - name: Install toolchain
+        env:
+          INSTALL_TEST_TOOLING: '0'
         run: bash scripts/ci/install-toolchain.sh
 
       # Same command a developer runs locally: `cargo xtask bpf`. The eBPF crate
@@ -126,3 +199,37 @@ jobs:
       # target, neither of which the host build in `fast` exercises on its own.
       - name: Build eBPF object
         run: bash scripts/ci/run.sh cargo xtask bpf
+
+  # Always runs, so a PR that touches neither Rust nor the data path still gets a
+  # definite status on the required check. A skipped dependency counts as green
+  # only because that is exactly what the paths filter decided above.
+  gate:
+    name: gate
+    if: always()
+    needs: [changes, fast, bpf]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Summarise job results
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          FAST: ${{ needs.fast.result }}
+          BPF: ${{ needs.bpf.result }}
+        run: |
+          echo "changes=$CHANGES fast=$FAST bpf=$BPF"
+          status=0
+          if [ "$CHANGES" != "success" ]; then
+            echo "::error::the changes job did not succeed ($CHANGES); the path filter is unreliable"
+            status=1
+          fi
+          for job in fast bpf; do
+            case "$job" in
+              fast) result="$FAST" ;;
+              bpf) result="$BPF" ;;
+            esac
+            if [ "$result" != "success" ] && [ "$result" != "skipped" ]; then
+              echo "::error::$job did not succeed ($result)"
+              status=1
+            fi
+          done
+          exit "$status"

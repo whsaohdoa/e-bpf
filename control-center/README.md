@@ -132,6 +132,7 @@ compose.yaml             cc-pg / cc-mgmt / cc-control / cc-web / cc-toolbox(prof
 - 单实例假设原样保留（内存防重放、单副本 StatefulSet），这是计划明确的范围。
 - `cc-toolbox` 需要 `--profile tools` 才起，且不挂 docker.sock：它查库、造 token，不编排容器。
 - 首次 `migrate.sh` 会在容器里下载 Liquibase 插件，几分钟；之后有 Maven 缓存则很快。
-- **没有 CI**：`.github/workflows/` 只覆盖 Rust 侧，`mvn package`、`npm run build`、
-  `compose config` 都没在流水线上跑过，改完只能本地跑 `scripts/smoke.sh`。
+- **CI 只覆盖「不装 Docker 的校验」**：`.github/workflows/control-center.yml` 跑 `mvn package`、
+  `npm ci && npm run build`、compose/kustomize 清单与脚本语法；四个镜像的 `docker build`、
+  k3d 起集群、smoke 仍只在本地 `scripts/*.sh`，所以 CI 绿不等于栈能起。
 - 未与 Rust 侧接线：probe 不向控制中心上报，`/agent/v1/*` 仍是空实现。

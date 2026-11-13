@@ -1,0 +1,119 @@
+name: control-center
+
+# `control-center/` 是仓库里第二个可独立运行的项目（Spring + Postgres + SPA + k3d），
+# 与 Rust 侧没有共享构建产物，所以它有自己的 workflow：改 Rust 不跑这里，改这里不跑
+# ci.yml 的 L0–L3。
+#
+# 只做「不装 Docker 也能做的校验」：后端 `mvn package`、前端 `vite build`、compose 与
+# kustomize 清单的静态校验、脚本语法。四个镜像的 `docker build` 与 k3d 起集群留给
+# `scripts/up.sh` / `k3d-up.sh` 在本地跑——runner 上跑一遍要十几分钟，收益不抵成本。
+#
+# 和 ci.yml 一样用 changes + gate，而不是 workflow 级 paths 过滤：被跳过的 job 不会
+# 上报状态，分支保护里把它设成 required 就会永远 pending。gate 恒执行，负责把
+# 「skipped」翻译成绿色。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # `dorny/paths-filter` 通过 REST API 读 PR 的改动文件列表。
+  pull-requests: read
+
+concurrency:
+  group: cc-ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  changes:
+    name: changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      cc: ${{ steps.filter.outputs.cc }}
+    steps:
+      # 拉全历史：push 事件下过滤器要本地 diff 一次提交区间。
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 判断改到了哪些路径
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            cc:
+              - 'control-center/**'
+              - '.github/workflows/control-center.yml'
+
+  build:
+    name: 构建（mvn + vite + 清单）
+    needs: changes
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.cc == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      # 项目要 JDK 21（宿主上常见的 17 跑不动 Spring Boot 3.5 的编译配置）。
+      - name: 安装 JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: 后端打包（跳过测试）
+        working-directory: control-center/app
+        # `-DskipTests`：`src/test` 目前不存在，这一层还没有测试可跑；等 S1-2 补上
+        # 再把它去掉。`-ntp` 只是让日志里没有下载进度条。
+        run: mvn -B -ntp -DskipTests package
+
+      - name: 安装 Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: control-center/web/package-lock.json
+
+      - name: 前端构建
+        working-directory: control-center/web
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      # 部署清单不 build 也能验证形状：compose 的变量插值、kustomize 的
+      # 资源引用、脚本的语法。这三件事在本地是 `scripts/up.sh` 第一次跑到才暴露的。
+      - name: 校验部署清单
+        run: |
+          docker compose -f control-center/compose.yaml config -q
+          kubectl kustomize control-center/deploy/k3d/k8s >/dev/null
+          for script in control-center/scripts/*.sh; do
+            bash -n "$script"
+          done
+
+  gate:
+    name: gate
+    if: always()
+    needs: [changes, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: 汇总 job 结果
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          BUILD: ${{ needs.build.result }}
+        run: |
+          echo "changes=$CHANGES build=$BUILD"
+          status=0
+          if [ "$CHANGES" != "success" ]; then
+            echo "::error::changes 没有成功（$CHANGES），路径过滤不可信"
+            status=1
+          fi
+          if [ "$BUILD" != "success" ] && [ "$BUILD" != "skipped" ]; then
+            echo "::error::build 没有成功（$BUILD）"
+            status=1
+          fi
+          exit "$status"
