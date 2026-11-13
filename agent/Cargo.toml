@@ -4,15 +4,48 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 
+[features]
+# The in-process mock control plane (`src/mock/`) is the only way to exercise
+# the client and the state machine without a real server, so it is on by
+# default: `cargo test -p agent --tests` (the `agent` xtask layer) then needs no
+# extra flag. A production build that must not link `rcgen` uses
+# `--no-default-features`, which also drops the `control-mock` binary.
+default = ["mock"]
+mock = ["dep:rcgen", "dep:serde", "dep:serde_json"]
+
 [dependencies]
-# No "user" feature on probe-common: it pulls in `aya`, and this crate never
-# touches the kernel (contract §13.1).
+# `probe::sink::AggSink` and `probe::aggregate::AggRecord` are the reporting
+# port and row type this crate implements; the control agent never loads eBPF.
+probe = { path = "../probe" }
 probe-common = { path = "../probe-common" }
+async-trait = { workspace = true }
+# `probe::sink::AggSink` is an `anyhow`-flavoured port, so the sink impl needs it.
+anyhow = { workspace = true }
+env_logger = { workspace = true }
+log = { workspace = true }
 prost = { workspace = true }
 # Referenced by the generated code (`google.protobuf.Timestamp` fields).
 prost-types = { workspace = true }
+rcgen = { workspace = true, optional = true }
+# The `control-mock` binary reads its `--config` file as JSON.
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "time", "sync"] }
+tonic = { workspace = true }
+tonic-prost = { workspace = true }
 
 [build-dependencies]
-prost-build = { workspace = true }
+# `tonic-prost-build` is the prost half of tonic 0.14's code generator; it
+# emits `Encoder`/`Decoder` impls plus the client and server stubs.
+tonic-prost-build = { workspace = true }
+
+[[bin]]
+name = "control-mock"
+path = "src/bin/control-mock.rs"
+required-features = ["mock"]
+
+[dev-dependencies]
+rcgen = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "time", "sync"] }

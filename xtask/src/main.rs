@@ -5,7 +5,7 @@
 //!
 //! | command | what it runs |
 //! | --- | --- |
-//! | `cargo xtask test [--layer l0\|l1\|l2\|all]` | unit, contract and in-process pipeline tests |
+//! | `cargo xtask test [--layer l0\|l1\|l2\|agent\|all]` | unit, contract, pipeline and S-B agent tests |
 //! | `cargo xtask bpf` | the BPF object build with the pinned nightly toolchain |
 //! | `cargo xtask e2e [--case <id>] [--jobs <n>]` | the privileged L3 driver in `probe/tests/e2e.rs` |
 //! | `cargo xtask e2e --legacy [--script <name>]` | the leftover bash suite (`run_perf.sh`) |
@@ -34,7 +34,7 @@ const E2E_TESTS: [&str; 1] = ["e2e"];
 
 /// Layers in the order a full run executes them: cheapest first, so a unit test
 /// failure is reported before the slower layers start.
-const ALL_LAYERS: [Layer; 3] = [Layer::L0, Layer::L1, Layer::L2];
+const ALL_LAYERS: [Layer; 4] = [Layer::L0, Layer::L1, Layer::L2, Layer::Agent];
 
 fn main() -> ExitCode {
     match dispatch() {
@@ -72,7 +72,8 @@ const USAGE: &str = "\
 usage: cargo xtask <command>
 
 commands:
-  test [--layer l0|l1|l2|all]   run the test layers (default: all)
+  test [--layer l0|l1|l2|agent|all]
+                                run the test layers (default: all)
   bpf                           build the eBPF object; nightly is the default toolchain
   e2e [--case ID] [--jobs N]    run the privileged L3 driver (E-01..E-07)
   e2e --legacy [--script NAME]  run the leftover bash suite (verification/run_perf.sh)
@@ -88,6 +89,10 @@ enum Layer {
     L0,
     L1,
     L2,
+    /// The S-B control agent: an in-process mock control plane over mTLS plus
+    /// the mock-driven state machine tests. Kept out of L1/L2 because those
+    /// target the `probe` crate.
+    Agent,
 }
 
 impl Layer {
@@ -96,6 +101,7 @@ impl Layer {
             Self::L0 => "l0",
             Self::L1 => "l1",
             Self::L2 => "l2",
+            Self::Agent => "agent",
         }
     }
 
@@ -104,6 +110,7 @@ impl Layer {
             Self::L0 => "L0 unit tests",
             Self::L1 => "L1 contract tests",
             Self::L2 => "L2 in-process pipeline tests",
+            Self::Agent => "agent control-plane tests",
         }
     }
 }
@@ -114,8 +121,9 @@ fn parse_layers(value: &str) -> Result<Vec<Layer>, String> {
         "l0" => Ok(vec![Layer::L0]),
         "l1" => Ok(vec![Layer::L1]),
         "l2" => Ok(vec![Layer::L2]),
+        "agent" => Ok(vec![Layer::Agent]),
         other => Err(format!(
-            "unknown layer `{other}`: expected l0, l1, l2 or all"
+            "unknown layer `{other}`: expected l0, l1, l2, agent or all"
         )),
     }
 }
@@ -158,6 +166,13 @@ fn run_layer(layer: Layer, nextest: bool) -> Result<(), String> {
                 "agent".into(),
             ]);
             args.push("--lib".into());
+            run(cargo_command(&args), layer.describe())
+        }
+        Layer::Agent => {
+            // The mock control plane is behind the crate's `mock` feature,
+            // which is on by default, so plain `--tests` is enough.
+            let mut args = runner_args(nextest, layer)?;
+            args.extend(["-p".into(), "agent".into(), "--tests".into()]);
             run(cargo_command(&args), layer.describe())
         }
         Layer::L1 | Layer::L2 => {
@@ -206,7 +221,7 @@ fn integration_tests(layer: Layer) -> Result<Vec<String>, String> {
         let matches = match layer {
             Layer::L2 => is_pipeline,
             Layer::L1 => !is_pipeline,
-            Layer::L0 => false,
+            Layer::L0 | Layer::Agent => false,
         };
         if matches {
             names.push(stem.to_owned());

@@ -1,18 +1,33 @@
-//! Pure logic of the control agent (stage S-A).
+//! Pure logic and control-plane plumbing of the control agent (stages S-A/S-B).
 //!
-//! This crate has no transport and no kernel access: it decodes a
+//! The S-A half has no transport and no kernel access: it decodes a
 //! `ConfigEnvelope` document, checks it in the contract's six-step order,
 //! converts it into the data path's `ProbeConfig`, and computes the `key_hash`
-//! used to anonymise aggregation keys in reports. Everything here is
-//! deterministic and testable without a network, a clock or a kernel.
+//! used to anonymise aggregation keys in reports.
+//!
+//! The S-B half talks to a control plane over gRPC + mutual TLS
+//! ([`client`]), keeps the call schedule of contract §2.6 ([`backoff`]) and
+//! runs the register → cursor → config → apply → report state machine of §8
+//! ([`agent_loop`], [`report`]). Nothing here touches a kernel, and the agent
+//! never blocks the data path.
 //!
 //! Contract: `docs/Control-Agent-API-v1.md` (kept outside this repository, see
 //! `AGENTS.md`).
 
+pub mod agent_loop;
+pub mod backoff;
 pub mod cidr;
+pub mod client;
+pub mod clock;
 pub mod config;
 pub mod error;
 pub mod keyhash;
+pub mod report;
+
+/// In-process mock control plane, used by this crate's integration tests and by
+/// the `control-mock` binary. Test scaffolding only — never deployed.
+#[cfg(feature = "mock")]
+pub mod mock;
 
 /// Types generated from `proto/control.proto` (contract §4).
 ///
