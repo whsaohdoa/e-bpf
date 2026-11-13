@@ -1,10 +1,13 @@
 # Train 0 控制中心骨架（control-center）
 
-`docs/Train0-Plan-6x1.md` 里控制中心的**可运行投影**：管理面 + 控制面 + Postgres + SPA，
+`Train0-Plan-6x1.md` 里控制中心的**可运行投影**：管理面 + 控制面 + Postgres + SPA，
 一套 compose 就能起，一套 k3d 清单就能上集群。目标不是把 S1–S3 的功能写完，而是先把
 **镜像边界、数据库边界、网络边界**三件事定死——后面的功能都长在这三条边界上。
 
-本目录属于 `probe` 仓库，因此改动在分支 `feat/control-center-skeleton` 上。
+> 下文引用的 `Train0-Plan-6x1.md` 不在本仓库内，指工作区外层的 `docs/Train0-Plan-6x1.md`。
+
+本目录属于 `probe` 仓库，但是一个独立可运行的子项目：只改 `control-center/` 时不需要跑
+Rust 的分层测试，反之亦然。两者的接线状态见 `probe/README.md` 顶部两个项目的导航表。
 
 ## 1. 四个镜像，各装什么
 
@@ -19,7 +22,7 @@
 
 - **不放 docker CLI / docker.sock 进服务镜像**。Testcontainers 在 k8s 里本来就没有 daemon，
   放进去只会让"集成测试通过"变成假象；集成测试连 compose 的真 Postgres。
-- **不放 Redis / Kafka / ELK**。计划明确"不做缓存回退"（`docs/Train0-Plan-6x1.md:41`）、
+- **不放 Redis / Kafka / ELK**。计划明确"不做缓存回退"（`Train0-Plan-6x1.md:41`）、
   outbox 是**表**（`:174-179`）、防重放用**进程内存**（`:139`）。
 - **JRE 里没有 keytool 之外的 PKCS12 工具也无所谓**：Spring SSL bundle 用 keytool 生成的
   keystore 即可；需要 PEM ↔ PKCS12 互转时用 cc-toolbox 的 openssl。
@@ -108,7 +111,7 @@ bash scripts/k3d-down.sh
 - 登录/会话/JWT 签发与校验、jti 内存防重放（S1-2）
 - `/api/proposals`、发布、`/agent/v1/*`、`/internal/v1/audit/events` 的实际实现（S1-3）
 - mTLS 设备证书签发与 CN 绑定（S2）
-- 6 个负向验收用例（`docs/Train0-Plan-6x1.md:36`）目前只有 `/api/machines` 一条形状断言
+- 6 个负向验收用例（`Train0-Plan-6x1.md:36`）目前只有 `/api/machines` 一条形状断言
 - 种子里的 `password_hash` 是 `!pending` 占位，S1-2 换 Argon2id，不允许手写 hash
 
 ## 7. 目录
@@ -129,3 +132,6 @@ compose.yaml             cc-pg / cc-mgmt / cc-control / cc-web / cc-toolbox(prof
 - 单实例假设原样保留（内存防重放、单副本 StatefulSet），这是计划明确的范围。
 - `cc-toolbox` 需要 `--profile tools` 才起，且不挂 docker.sock：它查库、造 token，不编排容器。
 - 首次 `migrate.sh` 会在容器里下载 Liquibase 插件，几分钟；之后有 Maven 缓存则很快。
+- **没有 CI**：`.github/workflows/` 只覆盖 Rust 侧，`mvn package`、`npm run build`、
+  `compose config` 都没在流水线上跑过，改完只能本地跑 `scripts/smoke.sh`。
+- 未与 Rust 侧接线：probe 不向控制中心上报，`/agent/v1/*` 仍是空实现。

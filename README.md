@@ -1,4 +1,16 @@
-# probe — XDP ingress 窗口聚合采集（Train 0）
+# e-bpf — XDP 观测数据面 + 控制中心（Train 0）
+
+本仓库包含两个可以独立构建、独立运行的部分：
+
+| 部分 | 技术栈 | 入口 | 状态 |
+|---|---|---|---|
+| `probe/` 数据面 | Rust（aya）+ eBPF（`bpfel-unknown-none`） | 本文件 | 可用：窗口聚合 + 两份 CSV，L0–L3 测试 |
+| `control-center/` 控制面 | Spring Boot 3.5 / Java 21 + Postgres 17 + Vite/React + compose/k3d | [`control-center/README.md`](control-center/README.md) | 骨架：镜像、数据库、网络边界已定，业务接口未实现 |
+
+两者**尚未接线**：probe 只写本地 CSV，还没有向控制中心上报（E8 未落地）。
+改代码看 `CONTRIBUTING.md`（构建、测试分层、门禁、真机验证），硬性约定与禁区看 `AGENTS.md`。
+
+本文其余部分只讲 `probe/`。
 
 ## 概述
 
@@ -38,15 +50,19 @@ IPv6，必要时取 TCP/UDP 端口，然后在**内核 per-CPU 哈希表里按�
     └───────────────────────────────────────────────┘
 ```
 
-## 目录
+## 代码布局
+
+五个 crate，依赖方向单向（`probe` / `probe-ebpf` / `testkit` → `probe-common`）：
 
 ```
-probe-common/src/lib.rs   # 唯一 ABI 定义：SampleEvent / AggKey / AggValue / ProbeConfig + 布局单测
-probe-ebpf/src/main.rs    # XDP 数据面：解析、CONFIG 读取、per-CPU 聚合、首包样本、STATS
-probe/src/main.rs         # CLI、CONFIG 下发/回读、attach、ringbuf 与 AGG 扫描循环、退出统计
-probe/src/aggregate.rs    # 纯逻辑：窗口水位线、per-CPU 槽位合并、样本去重、时钟与格式化
-probe/src/sink.rs         # Event / Sink / AggSink 抽象 + 两个 CSV 后端 + 工厂
+probe-common/   唯一 ABI 定义（no_std）：SampleEvent / AggKey / AggValue / ProbeConfig + 布局单测
+probe-ebpf/     XDP 数据面（no_std）：解析、CONFIG、per-CPU 聚合、首包样本、STATS
+probe/          用户态：CLI、CONFIG 下发/回读、attach、ringbuf 与 AGG 扫描、CSV 落盘
+testkit/        e2e 共用件：AF_PACKET 发帧、veth/命名空间辅助、CSV 断言
+xtask/          开发入口 `cargo xtask`：分层测试、BPF 构建、e2e、发帧、报告
 ```
+
+完整文件清单、「按职责找文件」表与控制中心的目录说明见 `CONTRIBUTING.md#4-代码地图`。
 
 ## 数据面流程
 
@@ -352,97 +368,25 @@ stats: packets_total=1503 sample_rows=4 events_received=6 rows_written=4 agg_rec
 ## 构建与运行
 
 ```bash
-cd /workspace/probe
-cargo build --release
-
-# 默认：样本 /workspace/packets.csv，聚合 /workspace/aggregates.csv，10s 窗口
-sudo -E ./target/release/probe --iface veth0
-
-# 完整参数示例
-sudo -E ./target/release/probe \
-    --iface veth0 \
-    --sink csv \
-    --out /workspace/packets.csv \
-    --agg-out /workspace/aggregates.csv \
-    --window-ms 10000 \
-    --grace-ms 2000 \
-    --scan-ms 1000 \
-    --src-prefix-v4 24 \
-    --src-prefix-v6 64 \
-    --flush-ms 200 \
-    --append
+cargo build --release                          # 嵌套构建 probe-ebpf 并把对象嵌入二进制
+sudo -E ./target/release/probe --iface veth0   # 默认写 /workspace/{packets,aggregates}.csv
 ```
 
-`cargo build --release` 会通过 `probe/build.rs` 构建 `probe-ebpf` 并把对象嵌进二进制，
-所以改了 `probe-common`/`probe-ebpf` 之后**必须重新构建**，不能只替换二进制里的对象。
-
-`cargo test` 与 `cargo run` 都不再经过 `sudo`：`.cargo/config.toml` 里原先全局的
-`runner = "sudo -E"` 已删除（它让单测也依赖密码提示，并掩盖了"只有加载 eBPF 才需要特
-权"这件事）。加载 XDP 仍然需要特权，所以真机验证要么直接 `sudo -E ./target/release/probe`，
-要么在 `docker compose` 的特权开发容器里跑 `cargo xtask e2e --legacy`。
-
-### rust-analyzer 的 E0152
-
-`probe-ebpf` 的 panic handler 只在真正的 BPF 目标上定义：
-
-```rust
-#[cfg(all(not(test), target_arch = "bpf"))]
-#[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! { loop {} }
-```
-
-原因是 `probe` 启用了 `probe-common/user` → `aya` → `std`；当 rust-analyzer 或
-`cargo check -p probe -p probe-ebpf` 以 host target + workspace 特征统一去分析
-`probe-ebpf` 时，std 已经提供 `panic_impl`，再定义一次就会报 “found duplicate lang
-item `panic_impl`”。真实 eBPF 构建使用 `--target bpfel-unknown-none` +
-`-Z build-std=core`，没有 std，仍然需要该 handler。`target_arch = "bpf"` 正好区分这
-两种视图，不改变生成的 eBPF 对象。
+其余参数（`--append`、窗口/宽限/扫描周期、前缀长度）见上表「CLI 参数」。容器内构建、
+`/workspace` 路径约定与 rust-analyzer 的 E0152 见 `CONTRIBUTING.md#2-构建与运行`。
 
 ## 验证方式
 
-测试分三层，全部不需要特权，也不需要内核：
+```bash
+cargo xtask test   # L0 纯逻辑/ABI → L1 CLI 契约 → L2 进程内管线（无需特权、无需内核）
+cargo xtask e2e    # L3 真机 E-01…E-07（需特权容器，默认 -j 4，全绿约 10–20 秒）
+```
 
-| 层 | 命令 | 内容 |
-|---|---|---|
-| L0 | `cargo xtask test --layer l0` | `aggregate` / `sink` / `ports` 的纯逻辑单测与 ABI 布局 |
-| L1 | `cargo xtask test --layer l1` | CLI 契约（`probe/tests/` 里非 `pipeline`、非 `e2e` 的文件，当前为空） |
-| L2 | `cargo xtask test --layer l2` | 进程内管线 P-01…P-16：假 AGG map、可脚本化 ringbuf、内存 sink、注入时钟 |
-
-`cargo xtask test`（不带 `--layer`）按 L0→L1→L2 顺序跑全部；优先用 `cargo nextest`
-（`--profile ci` 会额外写 JUnit），没安装时自动回落 `cargo test`。`cargo xtask report`
-汇总上一次的 JUnit 报告。L2 不 `sleep`、不加载 eBPF，整层在毫秒级跑完；窗口关闭、迟到
-样本、去重、CSV 列序这些语义都由它守回归。
-
-分层测试的落地细节、L2 抓出的两个 bug、覆盖率实测与未完成项见
-`verification/REPORT-layered-tests.md`。
-
-真机层（L3）是 Rust 驱动：`cargo xtask e2e` 在特权容器里跑 `probe/tests/e2e.rs` 的
-E-01…E-07，默认 `-j 4`，单次全绿约 10-20 秒（预算 6 分钟）。每个用例自建唯一命名的
-veth 对、自建 `target/e2e/<case>/` 产物目录，`Drop` 负责清理；断言全在 Rust 里，没有
-固定 `sleep`（需要时序时用 `clock_gettime(CLOCK_MONOTONIC)` 对齐窗口边界），也没有
-`exit "$FAIL"` 这种会截断的退出码。
-
-| 用例 | 覆盖内容 |
-|---|---|
-| E-01 | attach 生命周期：`bpftool net` 先无后有、`run_cnt` 增长、SIGTERM 后无残留 |
-| E-02 | 100 帧落进单个 200 ms 窗口：`Σcount=100`、`packets_total=100`、无迟到/畸形 |
-| E-03 | 16 条固定帧矩阵逐条对照 `tests/fixtures/frames/index.tsv`（9 收 7 拒） |
-| E-04 | SIGTERM 打断未关闭窗口：写出 `window_complete=0` 的 partial 行，统计完整 |
-| E-05 | `CONFIG` 版本不匹配：`STATS[CONFIG_MISSING]` 累加，仍 `XDP_PASS`、计数不丢 |
-| E-06 | `--features small-maps`（AGG=1024）+ 1100 个键：`agg_overflow>0` 且键数守恒 |
-| E-07 | 两个 probe 分挂 veth 两端共写一份 CSV（`--append`）：一条 header、两个 iface、无错行 |
-
-定帧发送器由 `cargo xtask send --iface IF [--count N]` 暴露，与用例共用
-`testkit` 里的 AF_PACKET 实现。真机验证的证据与结论见 `verification/REPORT-e2e.md`。
-
-性能对比仍是 shell 脚本（`cargo xtask e2e --legacy`）：
-
-| 脚本 | 覆盖内容 |
-|---|---|
-| `verification/run_perf.sh` | 新旧实现性能对比（`MODE=old` / `MODE=new`）：发送数、样本行/秒、Σcount 误差、用户态 CPU%、`kernel_dropped` |
-
-聚合改造的完整证据与结论见 `verification/REPORT-aggregation.md`；早期逐包实现的报告
-（`REPORT-xdp-ipv4.md` / `REPORT-xdp-ipv6.md`）只适用于旧版本，本版 CSV 语义已变化。
+L0 是 `aggregate`/`sink`/`ports` 的纯逻辑与 ABI 布局，L1 是 `probe/tests/csv_schema.rs`
+的 CLI 与列序契约，L2 是进程内管线 P-01…P-16（假 AGG map、可脚本化 ringbuf、注入时钟）。
+L3 是 Rust 驱动的真机层，用例清单、分层细节与证据见 `CONTRIBUTING.md#3-测试与门禁`、
+`verification/REPORT-e2e.md`；性能对比用 `cargo xtask e2e --legacy`（`verification/run_perf.sh`），
+结论见 `verification/REPORT-aggregation.md`。
 
 快速手工验证：
 
@@ -474,7 +418,8 @@ ip netns del aya-ns
 ## 已知限制
 
 - **无规则匹配（E6 未实现）**：`action` 恒为 `pass`、`rule_id = 0`、`reason = 0`，
-  不读 `default_action`，不做丢弃。E8（上报/控制面）同样不在本阶段。
+  不读 `default_action`，不做丢弃。E8 也未接线：`control-center/` 已有控制面骨架，
+  但 probe 只写本地 CSV，不上报。
 - **IPv6 扩展头不遍历**：`protocol` 取 base header 的 Next Header；遇到
   Hop-by-Hop(0)/Routing(43)/Fragment(44)/DestOpts(60)/AH(51) 时该列可能不是最终 L4
   协议（例如 MLDv2 显示 `0`），此时端口为 0。
@@ -496,11 +441,10 @@ ip netns del aya-ns
   尚未 flush 的 partial 窗口数据和 ringbuf 内容会丢失。
 - **单点时间基**：窗口边界与时间戳都来自 `CLOCK_MONOTONIC` 换算；用户态启动时采样
   一次 wall-clock 偏移，不逐包或逐窗口校时。
-- `/workspace` 是 bind mount（Windows 9p/drvfs），只保证 `flush(2)` 级别，不额外
-  `fsync` 每个批次。
-- WSL2 下 attach 使用 `XdpMode::default()`；本环境 veth 走 driver 模式、`lo` 走
-  generic。若目标网卡不支持 native XDP，需要把 `XdpMode` 改为 `Skb`（generic）；
-  native 模式未验证。
+
+环境相关的限制只对开发容器成立，见 `CONTRIBUTING.md#5-本机环境相关的注意事项`：
+`/workspace` 是 bind mount（Windows 9p/drvfs，只到 `flush(2)`）、WSL2 下 attach 用
+`XdpMode::default()`（veth 走 driver、`lo` 走 generic，native XDP 未验证）。
 
 ## 许可
 
