@@ -5,9 +5,11 @@ name: probe 镜像
 # binary. There are no registry credentials in this repository, so the image is
 # built and smoke-tested but not pushed.
 #
-# Triggered by changes to the image inputs on main and by hand: rebuilding
-# whenever Dockerfile.ci or the toolchain script changes is cheap, and
-# source-only changes are covered by ci.yml. main only, like ci.yml.
+# Triggered by changes to the image inputs — the Dockerfiles, the toolchain
+# script and the workspace sources that end up inside the image — on main and by
+# hand. Sources belong here because the whole point of the `check` target is to
+# catch glibc/runtime mismatches of the built binary: a manifest or `probe/`
+# change is exactly what invalidates the previous smoke run.
 #   gh workflow run image.yml --ref main
 on:
   workflow_dispatch:
@@ -17,6 +19,14 @@ on:
       - Dockerfile
       - Dockerfile.ci
       - .dockerignore
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain*
+      - .cargo/**
+      - probe/**
+      - probe-common/**
+      - probe-ebpf/**
+      - xtask/**
       - scripts/ci/**
       - .github/workflows/image.yml
 

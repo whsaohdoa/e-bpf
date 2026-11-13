@@ -1,0 +1,53 @@
+server:
+  port: 8080
+  shutdown: graceful
+
+spring:
+  application:
+    name: cc-service
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+  datasource:
+    url: ${CC_DB_URL}
+    username: ${CC_DB_USER:cc_app}
+    password: ${CC_DB_PASSWORD:cc_app}
+    hikari:
+      # Each service owns one schema; set it on the connection so queries stay unqualified.
+      schema: ${CC_DB_SCHEMA:mgmt}
+      maximum-pool-size: ${CC_DB_POOL:10}
+      connection-timeout: 3000
+      validation-timeout: 1000
+  liquibase:
+    change-log: classpath:db/${CC_DB_SCHEMA:mgmt}/changelog.sql
+    default-schema: ${CC_DB_SCHEMA:mgmt}
+    liquibase-schema: ${CC_DB_SCHEMA:mgmt}
+    user: ${CC_MIGRATOR_USER:cc_migrator}
+    password: ${CC_MIGRATOR_PASSWORD:cc_migrator}
+  jackson:
+    time-zone: UTC
+    serialization:
+      write-dates-as-timestamps: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: always
+  health:
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true
+
+cc:
+  role: ${CC_ROLE:mgmt}
+  version: ${CC_VERSION:dev}
+
+logging:
+  pattern:
+    level: "%5p [${spring.application.name:-},%X{request_id:-}]"

@@ -1,0 +1,139 @@
+name: cc-train0
+
+services:
+  cc-pg:
+    build:
+      context: .
+      dockerfile: deploy/images/cc-pg/Dockerfile
+      args:
+        PG_IMAGE: ${CC_PG_BASE:-postgres:17-bookworm}
+    image: cc-pg:17
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${CC_PG_SUPERUSER_PASSWORD:-postgres}
+      POSTGRES_DB: postgres
+      CC_MIGRATOR_PASSWORD: ${CC_MIGRATOR_PASSWORD:-cc_migrator}
+      CC_APP_PASSWORD: ${CC_APP_PASSWORD:-cc_app}
+      CC_AUDIT_PASSWORD: ${CC_AUDIT_PASSWORD:-cc_audit}
+      CC_RO_PASSWORD: ${CC_RO_PASSWORD:-cc_ro}
+      TZ: UTC
+      PGTZ: UTC
+    command:
+      - postgres
+      - -c
+      - log_min_duration_statement=200ms
+      - -c
+      - log_statement=ddl
+      - -c
+      - max_connections=100
+      - -c
+      - timezone=UTC
+    ports:
+      - "127.0.0.1:${CC_PG_PORT:-55432}:5432"
+    volumes:
+      - cc-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d mgmt -q"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  cc-mgmt:
+    build:
+      context: .
+      dockerfile: deploy/images/cc-java/Dockerfile
+      args:
+        APP_VERSION: ${CC_VERSION:-0.1.0-dev}
+    image: cc-java:dev
+    environment:
+      CC_ROLE: mgmt
+      CC_VERSION: ${CC_VERSION:-0.1.0-dev}
+      CC_DB_URL: jdbc:postgresql://cc-pg:5432/mgmt
+      CC_DB_SCHEMA: mgmt
+      CC_DB_USER: cc_app
+      CC_DB_PASSWORD: ${CC_APP_PASSWORD:-cc_app}
+      CC_MIGRATOR_USER: cc_migrator
+      CC_MIGRATOR_PASSWORD: ${CC_MIGRATOR_PASSWORD:-cc_migrator}
+    ports:
+      - "127.0.0.1:${CC_MGMT_PORT:-8081}:8080"
+    depends_on:
+      cc-pg:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/actuator/health/liveness > /dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 40
+      start_period: 20s
+
+  cc-control:
+    image: cc-java:dev
+    environment:
+      CC_ROLE: control
+      CC_VERSION: ${CC_VERSION:-0.1.0-dev}
+      CC_DB_URL: jdbc:postgresql://cc-pg:5432/control
+      CC_DB_SCHEMA: control
+      CC_DB_USER: cc_app
+      CC_DB_PASSWORD: ${CC_APP_PASSWORD:-cc_app}
+      CC_MIGRATOR_USER: cc_migrator
+      CC_MIGRATOR_PASSWORD: ${CC_MIGRATOR_PASSWORD:-cc_migrator}
+    ports:
+      - "127.0.0.1:${CC_CONTROL_PORT:-8082}:8080"
+    depends_on:
+      cc-pg:
+        condition: service_healthy
+      cc-mgmt:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/actuator/health/liveness > /dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 40
+      start_period: 20s
+
+  cc-web:
+    build:
+      context: .
+      dockerfile: deploy/images/cc-web/Dockerfile
+      args:
+        NODE_IMAGE: ${CC_NODE_IMAGE:-node:22-alpine}
+        NGINX_IMAGE: ${CC_NGINX_IMAGE:-nginx:1.27-alpine}
+    image: cc-web:dev
+    ports:
+      - "127.0.0.1:${CC_WEB_PORT:-8080}:80"
+    depends_on:
+      cc-mgmt:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Opt-in toolbox: `docker compose --profile tools run --rm cc-toolbox`.
+  # It is the only place with psql 17 + jose + openssl + jq together, and it never mounts
+  # the docker socket.
+  cc-toolbox:
+    build:
+      context: .
+      dockerfile: deploy/images/cc-toolbox/Dockerfile
+      args:
+        PG_IMAGE: ${CC_PG_BASE:-postgres:17-bookworm}
+    image: cc-toolbox:dev
+    profiles: ["tools"]
+    working_dir: /w
+    volumes:
+      - .:/w
+    environment:
+      PGHOST: cc-pg
+      PGPORT: "5432"
+      PGPASSWORD: ${CC_APP_PASSWORD:-cc_app}
+      TZ: UTC
+    depends_on:
+      cc-pg:
+        condition: service_healthy
+    tty: true
+
+volumes:
+  cc-pgdata:
