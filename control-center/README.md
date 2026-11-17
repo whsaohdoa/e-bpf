@@ -39,7 +39,7 @@ Rust 的分层测试，反之亦然。两者的接线状态见 `probe/README.md`
                     └── /api/        → cc-mgmt:8080
 cc-mgmt    :8081──> 管理面（会话、机器、提案、审计查询）
 cc-control :8082──> 控制面（PEP、版本、管理面查询）   ← 仅 host loopback / 仅 mgmt 可达
-cc-control :9090──> agent 通道（gRPC + mTLS）        ← 预留：服务端下一分支实现
+cc-control :9090──> agent 通道（gRPC + mTLS）        ← cc.role=control 独占，clientAuth=REQUIRE
 cc-pg      :55432─> mgmt 库 + control 库（同实例，不同库、不同角色）
 ```
 
@@ -49,8 +49,10 @@ k3d 下同样的名字走 Traefik Ingress，`/api` → `cc-mgmt`，`/` → `cc-w
 
 9090 走独立策略 `allow-control-grpc-from-agents`：agent 在集群外（宿主上的 `probe-agent`），
 没有 pod 标签可选中，所以那条策略放行任意来源、由客户端证书认证；**8080 那条没有放宽**。
-compose 下 cc-control 也发布 `127.0.0.1:${CC_CONTROL_GRPC_PORT:-9090}`、k3d 的 Service 有
-`grpc/9090` 端口，但两个环境里今天都没有进程监听 9090 —— 服务端在下一分支。
+compose 下 cc-control 发布 `127.0.0.1:${CC_CONTROL_GRPC_PORT:-9090}`、k3d 的 Service 有
+`grpc/9090` 端口；`cc.role=control` 在该端口上提供原生 gRPC（mTLS，`clientAuth=REQUIRE`），
+`cc.role=mgmt` 不注册任何 `BindableService`，所以不监听 9090 —— `scripts/smoke.sh` 的两条断言
+分别盯这两个事实。k3d 里把 agent 命名空间真正接线是 E8 的事，Train 0 只在 compose 验证这条通道。
 
 ## 3. 快速开始（compose）
 
@@ -110,7 +112,8 @@ bash scripts/k3d-down.sh
 
 已有：两个角色共用一个 jar（`CC_ROLE=mgmt|control`）、健康/就绪探针、SPA 只读视图、
 种子数据（admin/aud/alice/bob/carol、g1/g2、m1/m2）、审计只追加、outbox 表结构、
-两库物理隔离、compose + k3d 两套部署、全程 UTC。
+两库物理隔离、compose + k3d 两套部署、全程 UTC、`control.agent.v1.AgentControl` gRPC
+服务端（9090，mTLS `clientAuth=REQUIRE`；Watch 仍 `UNIMPLEMENTED`）。
 
 还没有（对应计划后续切片，不假装完成）：
 
@@ -120,12 +123,12 @@ bash scripts/k3d-down.sh
   `POST /internal/v1/config-versions`（只在 `cc.role=control` 注册，靠 netpol 与 loopback 限制，
   是计划 §12-D3 的备选分支）；`/agent/v1/*` 这个
   REST 形态不会再做，agent 通道已改为 gRPC（见下一行）
-- gRPC `control.agent.v1.AgentControl` 待实现（契约见工作区 `docs/Control-Agent-API-v1.md`，
-  proto 在 `probe/agent/proto/control.proto`）。Rust 侧客户端、假控制面与 `probe-agent` 已在
-  `probe/agent/`；这里缺的是服务端本身，以及 9090 上的 TLS `clientAuth=REQUIRE`
-  （单一 CA，无吊销列表）。配套 schema 已完成
+- gRPC `control.agent.v1.AgentControl` 的六个方法已实现（Register / Heartbeat / GetConfig /
+  AckConfig / ReportWindows / GetCursor；契约见工作区 `docs/Control-Agent-API-v1.md`，proto 在
+  `probe/agent/proto/control.proto`），**Watch 仍返回 `UNIMPLEMENTED`**；9090 上要求 TLS
+  `clientAuth=REQUIRE`（单一 CA，无吊销列表）。配套 schema 已就位
   （`control-006…010`：agent 侧列、`config_version.document` 改 `bytea`、report/report_window/
-  report_sample/config_ack），结构断言在 `scripts/db-verify.sql`；缺的是 gRPC 服务端本身
+  report_sample/config_ack），结构断言在 `scripts/db-verify.sql`
 - mTLS 设备证书签发与 CN 绑定（S2）
 - 6 个负向验收用例（`Train0-Plan-6x1.md:36`）目前只有 `/api/machines` 一条形状断言
 - 种子里的 `password_hash` 是 `!pending` 占位，S1-2 换 Argon2id，不允许手写 hash
@@ -152,5 +155,9 @@ compose.yaml             cc-pg / cc-mgmt / cc-control / cc-web / cc-toolbox(prof
   `npm ci && npm run build`、compose/kustomize 清单与脚本语法；四个镜像的 `docker build`、
   k3d 起集群、smoke 仍只在本地 `scripts/*.sh`，所以 CI 绿不等于栈能起。
 - 未与 Rust 侧接线：`probe-agent` 已经会说 gRPC（见 `probe/README.md` 的「控制面通信」），
-  但这里的 `AgentControl` 服务端还没写，agent 调用会拿到 `UNIMPLEMENTED`；控制面也不会收到
-  任何 `ReportWindows`，所以「agent 上报 → Web 可见」这条链路仍不成立。
+  这里的 `AgentControl` 服务端也已就绪，但两端还没在真实集群里对接：agent 侧证书由
+  `scripts/dev-certs.sh` 在 compose 下生成，k3d 侧要手工 `kubectl create secret generic
+  control-plane-tls`（不入库，见 `deploy/k3d/k8s/40-control.yaml`），agent 命名空间的网络
+  接线按计划是 E8 的工作；在那之前 agent 调用会因连不上或证书不匹配失败，控制面也不会收到
+  任何 `ReportWindows`，所以「agent 上报 → Web 可见」这条链路仍不成立。`Watch` 方法仍是
+  `UNIMPLEMENTED`（流式订阅留到后续迭代）。
