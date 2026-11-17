@@ -115,13 +115,17 @@ bash scripts/k3d-down.sh
 还没有（对应计划后续切片，不假装完成）：
 
 - 登录/会话/JWT 签发与校验、jti 内存防重放（S1-2）
-- `/api/proposals`、发布、`/internal/v1/audit/events` 的实际实现（S1-3）；`/agent/v1/*` 这个
+- `/api/proposals`、`/internal/v1/audit/events` 的实际实现（S1-3）；发布路径已有
+  `ConfigPublisher`（编码一次 + 校验 + 审计同事务）和**未鉴权**的
+  `POST /internal/v1/config-versions`（只在 `cc.role=control` 注册，靠 netpol 与 loopback 限制，
+  是计划 §12-D3 的备选分支）；`/agent/v1/*` 这个
   REST 形态不会再做，agent 通道已改为 gRPC（见下一行）
 - gRPC `control.agent.v1.AgentControl` 待实现（契约见工作区 `docs/Control-Agent-API-v1.md`，
   proto 在 `probe/agent/proto/control.proto`）。Rust 侧客户端、假控制面与 `probe-agent` 已在
-  `probe/agent/`；这里缺的是服务端，以及配套三件事：`control.agent` 加 agent 侧列、
-  9090 上的 TLS `clientAuth=REQUIRE`（单一 CA，无吊销列表）、`config_version.document` 改
-  `bytea`（字节只编码一次、原样落库）
+  `probe/agent/`；这里缺的是服务端本身，以及 9090 上的 TLS `clientAuth=REQUIRE`
+  （单一 CA，无吊销列表）。配套 schema 已完成
+  （`control-006…010`：agent 侧列、`config_version.document` 改 `bytea`、report/report_window/
+  report_sample/config_ack），结构断言在 `scripts/db-verify.sql`；缺的是 gRPC 服务端本身
 - mTLS 设备证书签发与 CN 绑定（S2）
 - 6 个负向验收用例（`Train0-Plan-6x1.md:36`）目前只有 `/api/machines` 一条形状断言
 - 种子里的 `password_hash` 是 `!pending` 占位，S1-2 换 Argon2id，不允许手写 hash
