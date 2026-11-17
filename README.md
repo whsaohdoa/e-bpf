@@ -7,7 +7,7 @@
 | `probe/` 数据面 | Rust（aya）+ eBPF（`bpfel-unknown-none`） | 本文件 | 可用：窗口聚合 + 两份 CSV，L0–L3 测试 |
 | `control-center/` 控制面 | Spring Boot 3.5 / Java 21 + Postgres 17 + Vite/React + compose/k3d | [`control-center/README.md`](control-center/README.md) | 骨架：镜像、数据库、网络边界已定，业务接口未实现 |
 
-两者**尚未接线**：probe 只写本地 CSV，还没有向控制中心上报（E8 未落地）。
+两者**尚未接线**：Rust 侧已经有会说 gRPC 的 agent（`probe-agent`，见「控制面通信（Train 0）」），但 `control-center/` 里还没有 gRPC 服务端，agent 现在只连得上进程内假控制面 `control-mock`；CSV 仍然只由 `probe` 二进制写。
 改代码看 `CONTRIBUTING.md`（构建、测试分层、门禁、真机验证），硬性约定与禁区看 `AGENTS.md`。
 
 本文其余部分只讲 `probe/`。
@@ -415,11 +415,133 @@ ip link del veth0
 ip netns del aya-ns
 ```
 
+## 控制面通信（Train 0，E8 的前半）
+
+**边界一句话**：agent 通过 gRPC + mTLS 连控制面，拿到的是一串**原始字节**外加版本号与
+sha256，自己校验、应用、回 ack。Train 0 交付 Rust 侧的全部能力（`agent/` crate 与
+`probe-agent` 二进制）加一个**进程内假控制面** `control-mock`；Spring 侧的真控制面在下一个
+分支，契约见工作区 `docs/Control-Agent-API-v1.md`，proto 在 `agent/proto/control.proto`。
+
+### 手工跑一遍
+
+```bash
+cd /workspace/probe
+
+# 终端 1：假控制面（dev-only）。零配置时它把契约 §6.4 的文档 B 作为 version 1 发布，
+# 自签 CA 与客户端证书写到 --certs 目录，HTTP admin 在 127.0.0.1:9091。
+cargo run -p agent --features mock --bin control-mock -- \
+  --listen 127.0.0.1:9090 --certs .tmp/certs --admin-listen 127.0.0.1:9091
+
+# 终端 2：真 agent，XDP 挂到 lo（需要 root）。证书用 mock 写出来的那几个文件。
+sudo cargo run -p agent --bin probe-agent -- --iface lo \
+  --control-endpoint https://127.0.0.1:9090 \
+  --ca .tmp/certs/ca.pem \
+  --cert .tmp/certs/client-cert.pem \
+  --key .tmp/certs/client-key.pem \
+  --state-dir .tmp/agent-state --window-ms 1000 --grace-ms 200
+```
+
+第二条命令启动约一秒后打印出 ack 行：
+
+```
+INFO  agent::agent_loop] applied config version 1 (1 rules, 1 degraded)
+INFO  agent::agent_loop] acked config version 1 as Applied (recorded: true)
+```
+
+`1 degraded` 就是 L2：`rules` 收下但不执行。要发新版本，用 admin 端口（下面这条把
+`grace_ms` 从 2000 改成 2001，所以字节和 sha256 都变了，agent 必须真的下载并应用）：
+
+```bash
+curl -X POST http://127.0.0.1:9091/publish \
+  -d '{"version":2,"document_hex":"080110904e18d10f201828403a3108011206722d38303830180a20012a1f080410061a0b31302e302e312e302f3234220831302e302e322e352a02903f3001"}'
+curl http://127.0.0.1:9091/acks    # 服务端记下的 ack：applied_at_ms、content_sha256、watch_used
+curl http://127.0.0.1:9091/state   # 游标、各 RPC 计数、上报的窗口号
+```
+
+注意文档里没有 version 字段：**同一份字节换个版本号不会再 apply**，agent 走 §6.3 的同内容
+快捷路径直接 ack。要测真实生效，每轮必须发布不同字节（`run_control_demo.sh` 就是逐轮改
+`grace_ms` 那两个字节）。
+
+### 配置文档
+
+契约 §6.4 的**文档 B**（63 字节，含 1 条 `r-8080` 规则）：
+
+```
+schema_version: 1
+window_ms: 10000
+grace_ms: 2000
+src_prefix_v4: 24
+src_prefix_v6: 64
+default_action: DEFAULT_ACTION_PASS
+rules {
+  rule_index: 1
+  rule_id: "r-8080"
+  priority: 10
+  enabled: true
+  match {
+    family: FAMILY_IPV4
+    protocol: L4_PROTOCOL_TCP
+    src_prefix: "10.0.1.0/24"
+    dst_addr: "10.0.2.5"
+    dst_ports: 8080
+  }
+  action: ACTION_BLOCK
+}
+```
+
+text-format 编码后 63 字节，`content_sha256 = c3e4eea7f545643b966956fbea32fbbc3fb44acc019999dd5ed9552940b3d30f`。
+agent 只对**收到的字节**求哈希，**不重新序列化**：字节由控制面编码一次并原样落库
+（`config_version.document` 将来是 `bytea`），两端不需要跑同一个规范化器，也就不会出现
+「各自规范化、hash 对不上、所有 agent 都拒绝」的失败模式。
+
+### 七个 RPC
+
+| RPC | 干什么 | Train 0 状态 |
+| --- | --- | --- |
+| `Register` | 报到：agent 版本、机器标识、组、能力 | 实现（mock 与 agent） |
+| `Heartbeat` | 保活，响应里带 `desired_version` 与心跳间隔 | 实现 |
+| `GetConfig` | 取 `ConfigEnvelope`：version + 原始字节 + sha256 + published_at | 实现 |
+| `AckConfig` | 回执：APPLIED/REJECTED + applied_at + apply_ms + degraded_features | 实现 |
+| `ReportWindows` | 上报窗口聚合批次（含 `key_hash`） | 实现 |
+| `GetCursor` | 重启时问「上次提交到哪个窗口」 | 实现 |
+| `Watch` | 服务端流：有新版本就推，省掉一次心跳延迟 | agent 实现；真控制面 `UNIMPLEMENTED` |
+
+真控制面（Spring）这七个方法都还没写，agent 调用会拿到 `UNIMPLEMENTED`，这正是 L4，也是
+`control-mock` 存在的理由：它是给人和脚本手工戳 agent 用的，不是生产控制面。
+
+### 已知限制
+
+与契约 §10 同一口径（验收材料照抄）：
+
+| # | 限制 | 影响 |
+| --- | --- | --- |
+| L1 | 数据面恒放行，没有 XDP drop 路径 | 实际行为是 **fail-open**，与计划 :190 相反；不得写成「已 fail-closed」 |
+| L2 | `rules` 不在 agent 执行 | 带规则的配置只能降级应用，ack 里必须出现 `degraded_features:["rules"]` |
+| L3 | `window_id` 来自 `CLOCK_MONOTONIC` | 宿主重启后回零，会 upsert 覆盖上一段运行的同号行；只承诺进程重启续传 |
+| L4 | 真控制面的 `Watch` 返回 `UNIMPLEMENTED` | 配置生效延迟退化为心跳间隔（落后 1s / 追平 5s）；推送路径只在 stub 上被测过 |
+| L5 | 单一 CA、无吊销列表 | 吊销只靠 `control.agent.status`，不校验 CRL/OCSP；证书轮换不做 |
+| L6 | 无发布 API 的端到端链路 | G1 只能以 stub 为基准测「推送/心跳 → 拉取 → 校验 → ack」，不是计划 :30 的「发布 API 200 → ack」 |
+
+`rules` 的形状在 proto 里已经冻结（契约 §4），但 Train 0 不执行它：agent 把文档存下来、照样
+ack，并把 `rules` 放进 `degraded_features`，让控制面和 Web 能看见「已应用、规则未生效」——
+显式降级，而不是假装拦住了。
+
+### 与数据面老功能的关系
+
+- 判决仍然是 `XDP_PASS`：`probe-agent` 与 `probe` 都不丢包，控制面下发的 `rules` 也不改变
+  这一点（L1）。
+- `--out` / `--agg-out` 那两份 CSV 仍然只有 `probe` 二进制写。`probe-agent` 默认不写 CSV，
+  给了 `--csv-dir DIR` 才写 `DIR/packets.csv` 与 `DIR/aggregates.csv`（同样的 7/16 列、
+  追加模式），此时窗口不再上报。
+- `probe-agent` 复用 `probe/src/driver.rs` 的门面 attach XDP：先按 `--window-ms` 等
+  bootstrap 参数跑，第一个 `GetConfig` 到达后换成控制面文档。
+
 ## 已知限制
 
 - **无规则匹配（E6 未实现）**：`action` 恒为 `pass`、`rule_id = 0`、`reason = 0`，
-  不读 `default_action`，不做丢弃。E8 也未接线：`control-center/` 已有控制面骨架，
-  但 probe 只写本地 CSV，不上报。
+  不读 `default_action`，不做丢弃。E8 只完成了 Rust 侧：`probe-agent` 已经能连控制面
+  拉配置、回 ack（见上节），但 `control-center/` 还没有 gRPC 服务端，`probe` 二进制
+  本身仍然只写本地 CSV、不上报。
 - **IPv6 扩展头不遍历**：`protocol` 取 base header 的 Next Header；遇到
   Hop-by-Hop(0)/Routing(43)/Fragment(44)/DestOpts(60)/AH(51) 时该列可能不是最终 L4
   协议（例如 MLDv2 显示 `0`），此时端口为 0。

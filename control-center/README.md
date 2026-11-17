@@ -38,13 +38,19 @@ Rust 的分层测试，反之亦然。两者的接线状态见 `probe/README.md`
                     ├── /            → SPA 静态文件
                     └── /api/        → cc-mgmt:8080
 cc-mgmt    :8081──> 管理面（会话、机器、提案、审计查询）
-cc-control :8082──> 控制面（PEP、版本、agent 通道）   ← 仅 host loopback / 仅 mgmt 可达
+cc-control :8082──> 控制面（PEP、版本、管理面查询）   ← 仅 host loopback / 仅 mgmt 可达
+cc-control :9090──> agent 通道（gRPC + mTLS）        ← 预留：服务端下一分支实现
 cc-pg      :55432─> mgmt 库 + control 库（同实例，不同库、不同角色）
 ```
 
 k3d 下同样的名字走 Traefik Ingress，`/api` → `cc-mgmt`，`/` → `cc-web`；
-**`/internal/` 与 `/agent/` 不在 Ingress 里**，控制面只接受 `app=cc-mgmt` 的入站流量
+**`/internal/` 与 `/agent/` 不在 Ingress 里**，8080 上控制面只接受 `app=cc-mgmt` 的入站流量
 （`deploy/k3d/k8s/70-netpol.yaml`），对应验收步骤 15「bob 不能直连控制中心」。
+
+9090 走独立策略 `allow-control-grpc-from-agents`：agent 在集群外（宿主上的 `probe-agent`），
+没有 pod 标签可选中，所以那条策略放行任意来源、由客户端证书认证；**8080 那条没有放宽**。
+compose 下 cc-control 也发布 `127.0.0.1:${CC_CONTROL_GRPC_PORT:-9090}`、k3d 的 Service 有
+`grpc/9090` 端口，但两个环境里今天都没有进程监听 9090 —— 服务端在下一分支。
 
 ## 3. 快速开始（compose）
 
@@ -109,7 +115,13 @@ bash scripts/k3d-down.sh
 还没有（对应计划后续切片，不假装完成）：
 
 - 登录/会话/JWT 签发与校验、jti 内存防重放（S1-2）
-- `/api/proposals`、发布、`/agent/v1/*`、`/internal/v1/audit/events` 的实际实现（S1-3）
+- `/api/proposals`、发布、`/internal/v1/audit/events` 的实际实现（S1-3）；`/agent/v1/*` 这个
+  REST 形态不会再做，agent 通道已改为 gRPC（见下一行）
+- gRPC `control.agent.v1.AgentControl` 待实现（契约见工作区 `docs/Control-Agent-API-v1.md`，
+  proto 在 `probe/agent/proto/control.proto`）。Rust 侧客户端、假控制面与 `probe-agent` 已在
+  `probe/agent/`；这里缺的是服务端，以及配套三件事：`control.agent` 加 agent 侧列、
+  9090 上的 TLS `clientAuth=REQUIRE`（单一 CA，无吊销列表）、`config_version.document` 改
+  `bytea`（字节只编码一次、原样落库）
 - mTLS 设备证书签发与 CN 绑定（S2）
 - 6 个负向验收用例（`Train0-Plan-6x1.md:36`）目前只有 `/api/machines` 一条形状断言
 - 种子里的 `password_hash` 是 `!pending` 占位，S1-2 换 Argon2id，不允许手写 hash
@@ -135,4 +147,6 @@ compose.yaml             cc-pg / cc-mgmt / cc-control / cc-web / cc-toolbox(prof
 - **CI 只覆盖「不装 Docker 的校验」**：`.github/workflows/control-center.yml` 跑 `mvn package`、
   `npm ci && npm run build`、compose/kustomize 清单与脚本语法；四个镜像的 `docker build`、
   k3d 起集群、smoke 仍只在本地 `scripts/*.sh`，所以 CI 绿不等于栈能起。
-- 未与 Rust 侧接线：probe 不向控制中心上报，`/agent/v1/*` 仍是空实现。
+- 未与 Rust 侧接线：`probe-agent` 已经会说 gRPC（见 `probe/README.md` 的「控制面通信」），
+  但这里的 `AgentControl` 服务端还没写，agent 调用会拿到 `UNIMPLEMENTED`；控制面也不会收到
+  任何 `ReportWindows`，所以「agent 上报 → Web 可见」这条链路仍不成立。
