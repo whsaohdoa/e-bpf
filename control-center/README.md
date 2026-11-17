@@ -129,7 +129,7 @@ bash scripts/k3d-down.sh
 ## 7. 目录
 
 ```
-app/                     Maven 单模块 cc-service（Boot 3.5.16 / Java 21）
+app/                     Maven 单模块 cc-service（Boot 4.1.2 / Java 21）
   src/main/resources/db/{mgmt,control}/changelog.sql   Liquibase formatted SQL
 web/                     Vite + React SPA（dev 代理 /api → 127.0.0.1:8081）
 deploy/images/           四个镜像的 Dockerfile + cc-pg initdb + nginx.conf

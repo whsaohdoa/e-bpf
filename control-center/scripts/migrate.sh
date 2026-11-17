@@ -9,9 +9,14 @@
 # the JDBC driver match runtime exactly.
 #
 # Two details are easy to get wrong:
-#   * Liquibase must be told the schema (defaultSchemaName). Without it the tool looks for
-#     DATABASECHANGELOG in "public", sees no applied changesets, rolls back nothing and
-#     still exits 0 ("0 changesets rolled back").
+#   * Liquibase must be told the schema (defaultSchemaName) *and* reach it through the
+#     connection's search_path (currentSchema in the URL). Liquibase 5 (Boot 4) writes the
+#     DATABASECHANGELOG DDL schema-qualified but runs its bookkeeping SQL unqualified
+#     ("SELECT MAX(ORDEREXECUTED) FROM databasechangelog"), so with a migrator whose
+#     search_path is just "$user", public it dies with 'relation "databasechangelog" does
+#     not exist' (Liquibase 4 merely looked in "public", found nothing, exited 0). The
+#     service never hits this: it borrows a Hikari connection whose
+#     spring.datasource.hikari.schema already sets search_path.
 #   * changelog.sql declares logicalFilePath, so the service (classpath:...) and this script
 #     (filesystem path) record the same changeset identity.
 set -euo pipefail
@@ -30,7 +35,7 @@ docker network inspect "$COMPOSE_NET" >/dev/null 2>&1 \
 common=(
     -Dliquibase.changeLogFile="src/main/resources/db/$db/changelog.sql"
     -Dliquibase.defaultSchemaName="$db"
-    -Dliquibase.url="jdbc:postgresql://cc-pg:5432/$db"
+    -Dliquibase.url="jdbc:postgresql://cc-pg:5432/$db?currentSchema=$db"
     -Dliquibase.username="${CC_MIGRATOR_USER:-cc_migrator}"
     -Dliquibase.password="${CC_MIGRATOR_PASSWORD:-cc_migrator}"
 )
