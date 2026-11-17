@@ -8,8 +8,10 @@
 //! The S-B half talks to a control plane over gRPC + mutual TLS
 //! ([`client`]), keeps the call schedule of contract §2.6 ([`backoff`]) and
 //! runs the register → cursor → config → apply → report state machine of §8
-//! ([`agent_loop`], [`report`]). Nothing here touches a kernel, and the agent
-//! never blocks the data path.
+//! ([`agent_loop`], [`report`]).
+//!
+//! The S-C half attaches the real data path ([`driver`], [`crate::driver::DataPlane`])
+//! and drives it from the same loop; the agent never blocks the data path.
 //!
 //! Contract: `docs/Control-Agent-API-v1.md` (kept outside this repository, see
 //! `AGENTS.md`).
@@ -20,6 +22,7 @@ pub mod cidr;
 pub mod client;
 pub mod clock;
 pub mod config;
+pub mod driver;
 pub mod error;
 pub mod keyhash;
 pub mod report;

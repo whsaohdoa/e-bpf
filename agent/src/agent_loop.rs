@@ -28,6 +28,7 @@ use crate::{
     client::{ClientError, ControlClient, Rpc},
     clock::{ClockOffset, Sleeper, TokioSleeper},
     config,
+    driver::DataPlane,
     error::{AckErrorCode, ServerErrorCode},
     pb,
     report::ReportQueue,
@@ -36,6 +37,13 @@ use crate::{
 /// Contract §2.6: the whole graceful shutdown has a 5s budget, of which the
 /// final report may take 2s.
 pub const SHUTDOWN_REPORT_DEADLINE: Duration = Duration::from_secs(2);
+
+/// How often the loop drains the ring and advances the window watermark.
+///
+/// Independent of the heartbeat cadence: a 5s heartbeat with a 10ms window would
+/// let the ring overflow, so the data path is pumped five times per second even
+/// while the loop is waiting for the control plane.
+const DATA_PLANE_INTERVAL: Duration = Duration::from_millis(200);
 
 /// Last-resort heartbeat cadence, used only until the first `Register` response
 /// arrives; §5.2 says the server always supplies both values.
@@ -212,7 +220,11 @@ fn random_boot_id() -> String {
 /// Generic over the client and the applier so tests can inject either without a
 /// trait object; the reporter side comes in as a [`ReportQueue`] shared with the
 /// [`crate::report::ReportSink`] the probe writes to.
-pub struct AgentLoop<C: ControlClient, A: ConfigApply> {
+///
+/// The applier is also the data plane ([`DataPlane`]): it owns the eBPF object,
+/// so the loop is the only component that can drain the ring or apply a
+/// configuration.  That is deliberate — a second owner would race with `apply`.
+pub struct AgentLoop<C: ControlClient, A: ConfigApply + DataPlane> {
     client: C,
     apply: A,
     cfg: AgentConfig,
@@ -239,7 +251,7 @@ pub struct AgentLoop<C: ControlClient, A: ConfigApply> {
     watch_retry_at: tokio::time::Instant,
 }
 
-impl<C: ControlClient, A: ConfigApply> AgentLoop<C, A> {
+impl<C: ControlClient, A: ConfigApply + DataPlane> AgentLoop<C, A> {
     /// Builds a loop; it does nothing until [`Self::run`] is awaited.
     pub fn new(client: C, apply: A, cfg: AgentConfig) -> Self {
         let applied_version = apply.applied_version();
@@ -316,11 +328,56 @@ impl<C: ControlClient, A: ConfigApply> AgentLoop<C, A> {
         let result = self.steps(&mut shutdown).await;
         match result {
             Ok(()) | Err(AgentError::Shutdown) => {
+                // A partial window is still useful: write it before the final
+                // report so the control plane sees the packets counted so far.
+                // ReportSink only queues in memory, so this cannot hang, and a
+                // failure here must not turn a clean exit into a non-zero one.
+                if let Err(error) = self.apply.flush_pending() {
+                    log::warn!("cannot flush the open windows on shutdown: {error:#}");
+                }
                 self.final_report().await;
                 Ok(())
             }
             Err(error) => Err(error),
         }
+    }
+
+    /// Drains the ring and advances the window watermark.
+    ///
+    /// Called on every loop iteration and on [`DATA_PLANE_INTERVAL`].  A failure
+    /// is logged and otherwise ignored: the data path is fail-open, and a full
+    /// ring only means samples are dropped by the kernel, never that the agent
+    /// stops reporting.
+    fn pump(&mut self) {
+        self.apply.drain();
+        match probe::ports::mono_now_ns() {
+            Ok(now_ns) => {
+                if let Err(error) = self.apply.tick(now_ns) {
+                    log::warn!("data plane tick failed: {error:#}");
+                }
+            }
+            Err(error) => log::warn!("cannot read the monotonic clock: {error:#}"),
+        }
+    }
+
+    /// The data plane, returned once the loop has stopped.
+    ///
+    /// The binary needs it back to shut the probe down (final drain, counters)
+    /// and to detach the XDP program; the loop itself never detaches because
+    /// that would let packets bypass the program while reports are still in
+    /// flight.
+    pub fn into_apply(self) -> A {
+        self.apply
+    }
+
+    /// Envelope version of the last configuration the control plane applied.
+    pub fn applied_version(&self) -> u64 {
+        self.applied_version
+    }
+
+    /// Digest of the last applied envelope (empty before the first one).
+    pub fn applied_sha256(&self) -> &[u8] {
+        &self.applied_sha256
     }
 
     /// §8: `Register` → `GetCursor` → `GetConfig` → validate → apply →
@@ -660,7 +717,13 @@ impl<C: ControlClient, A: ConfigApply> AgentLoop<C, A> {
         shutdown: &mut Pin<&mut S>,
     ) -> Result<(), AgentError> {
         let mut next_heartbeat = tokio::time::Instant::now();
+        let mut next_pump = tokio::time::Instant::now() + DATA_PLANE_INTERVAL;
         loop {
+            // 0. Data path first.  The ring buffer is small and a heartbeat or a
+            //    report may take seconds, so the loop drains on every iteration
+            //    and on its own cadence while it waits.
+            self.pump();
+
             // 1. Reports first: every window that waits is a window the control
             //    plane cannot see, and the queue grows at the window rate.
             if !self.reports.is_empty() {
@@ -695,15 +758,18 @@ impl<C: ControlClient, A: ConfigApply> AgentLoop<C, A> {
                 continue;
             }
 
-            // 4. Nothing to do: wait for the next heartbeat, a notification, or
-            //    shutdown.
+            // 4. Nothing to do: wait for the next heartbeat, the next data-plane
+            //    pump, a notification, or shutdown.
             let sleep = tokio::time::sleep_until(next_heartbeat);
             tokio::pin!(sleep);
+            let pump_due = tokio::time::sleep_until(next_pump);
+            tokio::pin!(pump_due);
             match self.watch.take() {
                 Some(mut watch) => {
                     let outcome = tokio::select! {
                         () = &mut *shutdown => Wait::Shutdown,
                         () = &mut sleep => Wait::Heartbeat,
+                        () = &mut pump_due => Wait::Pump,
                         notification = watch.next() => Wait::Notification(notification),
                     };
                     match outcome {
@@ -712,6 +778,10 @@ impl<C: ControlClient, A: ConfigApply> AgentLoop<C, A> {
                             self.watch = Some(watch);
                             self.heartbeat(shutdown).await?;
                             next_heartbeat = tokio::time::Instant::now() + self.current_interval();
+                        }
+                        Wait::Pump => {
+                            self.watch = Some(watch);
+                            next_pump = tokio::time::Instant::now() + DATA_PLANE_INTERVAL;
                         }
                         Wait::Notification(Some(Ok(notification))) => {
                             self.watch = Some(watch);
@@ -739,6 +809,9 @@ impl<C: ControlClient, A: ConfigApply> AgentLoop<C, A> {
                             self.heartbeat(shutdown).await?;
                             next_heartbeat =
                                 tokio::time::Instant::now() + self.current_interval();
+                        }
+                        () = &mut pump_due => {
+                            next_pump = tokio::time::Instant::now() + DATA_PLANE_INTERVAL;
                         }
                     }
                 }
@@ -895,6 +968,8 @@ impl<C: ControlClient, A: ConfigApply> AgentLoop<C, A> {
 enum Wait {
     Shutdown,
     Heartbeat,
+    /// The data-plane pump timer fired; nothing else has to happen.
+    Pump,
     Notification(Option<Result<pb::ConfigNotification, ClientError>>),
 }
 

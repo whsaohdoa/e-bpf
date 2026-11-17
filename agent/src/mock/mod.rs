@@ -955,6 +955,11 @@ struct RecordingState {
     calls: usize,
     state: Option<pb::ConfigState>,
     failure: Option<ApplyFailure>,
+    /// Data-plane pumps seen by the loop (S-C drives the real probe this way).
+    drains: usize,
+    ticks: usize,
+    flushes: usize,
+    shutdowns: usize,
 }
 
 impl RecordingApply {
@@ -977,6 +982,16 @@ impl RecordingApply {
     /// How many times `apply` was called, failures included.
     pub fn calls(&self) -> usize {
         self.lock().calls
+    }
+
+    /// How many times the loop flushed the open windows (shutdown included).
+    pub fn flushes(&self) -> usize {
+        self.lock().flushes
+    }
+
+    /// How many times the loop drained the ring.
+    pub fn drains(&self) -> usize {
+        self.lock().drains
     }
 
     fn lock(&self) -> MutexGuard<'_, RecordingState> {
@@ -1008,6 +1023,33 @@ impl ConfigApply for RecordingApply {
 
     fn config_state(&self) -> pb::ConfigState {
         self.lock().state.unwrap_or(pb::ConfigState::Missing)
+    }
+}
+
+impl crate::driver::DataPlane for RecordingApply {
+    fn config(&self) -> probe_common::ProbeConfig {
+        // Before the first apply the double has no configuration; the loop never
+        // reads it, and `ProbeConfig::default()` keeps the trait total.
+        self.lock().applied.last().copied().unwrap_or_default()
+    }
+
+    fn drain(&mut self) {
+        self.lock().drains += 1;
+    }
+
+    fn tick(&mut self, _now_ns: u64) -> anyhow::Result<()> {
+        self.lock().ticks += 1;
+        Ok(())
+    }
+
+    fn flush_pending(&mut self) -> anyhow::Result<()> {
+        self.lock().flushes += 1;
+        Ok(())
+    }
+
+    fn shutdown(&mut self) -> anyhow::Result<probe::pipeline::Summary> {
+        self.lock().shutdowns += 1;
+        Ok(probe::pipeline::Summary::default())
     }
 }
 

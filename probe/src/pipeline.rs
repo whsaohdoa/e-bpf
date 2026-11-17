@@ -95,11 +95,17 @@ impl Summary {
 }
 
 /// One pipeline instance: the ports plus the state that spans the main loop.
-pub struct Session<'a> {
-    agg: &'a mut dyn AggStore,
-    samples: &'a mut dyn SampleSource,
-    sink: &'a mut dyn Sink,
-    agg_sink: &'a mut dyn AggSink,
+///
+/// The ports are owned (`Box<dyn ... + Send>`) instead of borrowed: a [`Session`]
+/// outlives the function that built it (the agent hands it to the loop that owns
+/// the attached probe), and the `Send` bound keeps the whole session movable
+/// across the runtime's worker threads.  Callers construct the concrete ports
+/// first and box them here.
+pub struct Session {
+    agg: Box<dyn AggStore + Send>,
+    samples: Box<dyn SampleSource + Send>,
+    sink: Box<dyn Sink + Send>,
+    agg_sink: Box<dyn AggSink + Send>,
     config: ProbeConfig,
     clock: Clock,
     table: AggTable,
@@ -107,14 +113,14 @@ pub struct Session<'a> {
     stats: Stats,
 }
 
-impl<'a> Session<'a> {
+impl Session {
     /// Wires the ports together.  `config` must be the value read back from
     /// `CONFIG`, and `clock` pairs the wall clock with the monotonic clock.
     pub fn new(
-        agg: &'a mut dyn AggStore,
-        samples: &'a mut dyn SampleSource,
-        sink: &'a mut dyn Sink,
-        agg_sink: &'a mut dyn AggSink,
+        agg: Box<dyn AggStore + Send>,
+        samples: Box<dyn SampleSource + Send>,
+        sink: Box<dyn Sink + Send>,
+        agg_sink: Box<dyn AggSink + Send>,
         config: ProbeConfig,
         clock: Clock,
     ) -> Self {
@@ -225,8 +231,13 @@ impl<'a> Session<'a> {
         if closed_samples.is_empty() && rows.is_empty() {
             return Ok(());
         }
-        write_aggs(self.agg_sink, &rows, &mut self.stats)?;
-        write_samples(self.sink, &closed_samples, self.clock, &mut self.stats)?;
+        write_aggs(self.agg_sink.as_mut(), &rows, &mut self.stats)?;
+        write_samples(
+            self.sink.as_mut(),
+            &closed_samples,
+            self.clock,
+            &mut self.stats,
+        )?;
         self.sink.flush()?;
         self.agg_sink.flush()?;
         Ok(())
@@ -242,11 +253,55 @@ impl<'a> Session<'a> {
         self.report_closed(time.mono_ns()?)
     }
 
+    /// Installs a new read-back configuration.
+    ///
+    /// The caller (the driver) has already written `CONFIG` and read it back, so
+    /// this only updates the userspace view used for window arithmetic and for
+    /// rebuilding aggregation keys.  Rows of the previous configuration must be
+    /// flushed with [`Session::flush_pending`] *before* calling this, otherwise
+    /// they would be rendered against the new window boundaries.
+    pub fn set_config(&mut self, config: ProbeConfig) {
+        self.config = config;
+    }
+
+    /// Writes every row that is still pending, all of them with
+    /// `window_complete = false`.
+    ///
+    /// This is the "the process is still running, but these windows will never
+    /// close" path: a configuration change settles the old windows at their old
+    /// boundary, and the shutdown path reuses it.  It is idempotent -- once the
+    /// table and the de-duplication store are empty, the next call writes
+    /// nothing.
+    pub fn flush_pending(&mut self) -> Result<()> {
+        // All keys, because none of these windows has necessarily seen its close
+        // scan (the periodic scan reports the complete ones).
+        self.scan_agg(None);
+        let open = self.table.take_pending();
+        write_aggs(self.agg_sink.as_mut(), &open, &mut self.stats)?;
+
+        // Every pending sample (one row per key), including the samples of
+        // windows that never closed.
+        let pending_samples = self.dedup.take_all();
+        write_samples(
+            self.sink.as_mut(),
+            &pending_samples,
+            self.clock,
+            &mut self.stats,
+        )?;
+
+        // Flush both files before the caller moves on; nothing may be lost if
+        // the probe is reconfigured or detached right after this.
+        self.sink.flush()?;
+        self.agg_sink.flush()?;
+        Ok(())
+    }
+
     /// Final drain, report of everything still pending and the exit summary.
     ///
     /// `kernel_counters` is called after the last drain, while the `STATS` map is
     /// still open, so the counters include samples produced during this drain.
-    /// Windows that never closed are flushed with `window_complete = 0`.
+    /// Windows that never closed are flushed with `window_complete = 0` through
+    /// [`Session::flush_pending`].
     pub fn shutdown(
         &mut self,
         kernel_counters: impl FnOnce() -> KernelCounters,
@@ -254,23 +309,7 @@ impl<'a> Session<'a> {
         // Whatever the kernel already queued must still reach disk.
         while self.drain_ring() != 0 {}
 
-        // Last complete `AGG` scan: this is the "all keys" variant, because the
-        // data path is about to be detached.  Whatever is left is written with
-        // `window_complete = 0`: none of these windows is guaranteed to have seen
-        // its close scan (the normal scan tick reports the complete windows).
-        self.scan_agg(None);
-        let open = self.table.take_pending();
-        write_aggs(self.agg_sink, &open, &mut self.stats)?;
-
-        // Every pending sample (one row per key) is written now, including the
-        // samples of windows that never closed.
-        let pending_samples = self.dedup.take_all();
-        write_samples(self.sink, &pending_samples, self.clock, &mut self.stats)?;
-
-        // Flush both files before the teardown starts; nothing may be lost after
-        // the program is detached.
-        self.sink.flush()?;
-        self.agg_sink.flush()?;
+        self.flush_pending()?;
 
         Ok(Summary {
             stats: self.stats,
