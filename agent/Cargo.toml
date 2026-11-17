@@ -43,6 +43,9 @@ tonic-prost = { workspace = true }
 # `tonic-prost-build` is the prost half of tonic 0.14's code generator; it
 # emits `Encoder`/`Decoder` impls plus the client and server stubs.
 tonic-prost-build = { workspace = true }
+# `build.rs` points the code generator at the bundled `protoc` and its
+# well-known-type includes instead of whatever the host happens to install.
+protoc-bin-vendored = { workspace = true }
 
 [[bin]]
 name = "control-mock"

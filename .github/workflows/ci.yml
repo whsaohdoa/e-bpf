@@ -117,15 +117,6 @@ jobs:
       - name: Install toolchain
         run: bash scripts/ci/install-toolchain.sh
 
-      # `agent/build.rs` runs protoc, which is not part of the Rust toolchain.
-      # Ubuntu 24.04 ships the same libprotoc (3.21.12) as the dev container, so
-      # the generated types are identical to the ones tested locally.
-      - name: Install protoc
-        run: |
-          sudo apt-get update -qq
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends protobuf-compiler
-          protoc --version
-
       - name: Toolchain versions
         run: |
           rustc -Vv

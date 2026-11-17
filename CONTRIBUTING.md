@@ -42,9 +42,11 @@ sudo -E ./target/release/probe --iface veth0 \
   其实没被检查，改过 import 要人工确认。
 - 新依赖加到 `[workspace.dependencies]`，默认 `default-features = false`；不要往 `probe-ebpf`
   引入仅宿主可用的 crate。
-- `agent` 的 `build.rs` 编译 `agent/proto/control.proto`，需要 `protoc`（**不在** Rust 工具链里）：
-  开发容器里 `apt-get install -y protobuf-compiler`（当前 libprotoc 3.21.12），CI 的 fast job
-  装同一个包；缺 `protoc` 时 `cargo build -p agent` 会在 `build.rs` 处直接失败。
+- `agent` 的 `build.rs` 编译 `agent/proto/control.proto`。`protoc` **不在** Rust 工具链里，
+  但构建脚本用的是 `protoc-bin-vendored` 自带的二进制和 well-known-type include，
+  不依赖宿主机装的 protobuf（Ubuntu 上 `protobuf-compiler` 并不带
+  `google/protobuf/timestamp.proto`，带它的是 `libprotobuf-dev`）。所以本地和 CI
+  都不需要额外 `apt-get install`；首次构建会随 Cargo 依赖下载对应平台的 protoc。
 
 ### rust-analyzer 的 E0152
 
