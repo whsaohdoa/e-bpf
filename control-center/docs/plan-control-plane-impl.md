@@ -358,6 +358,8 @@ Maven 中央仓慢，`.tmp/settings.xml` 写 aliyun 镜像（`<mirrorOf>central<
 3. **§13 第 1 步的门不可直接复制**：`mvn -q -B -DskipTests package` 在宿主跑不了（JDK 17、无 mvn 21 环境），必须走 `docker run … maven:3.9-eclipse-temurin-21`；`cmp` 在纯 pwsh 也没有，proto 门要么 Git Bash 要么容器内。
 4. **§5.2 的 007 回滚只在空表成立**（设计已注明），但 §13 第 3 步"回滚路径手跑一遍"没写前提；本计划把它限定在空库并在 §7 写明。
 5. **§3 未写明 mgmt 安全的来源**：真正兜底的是 `@ConditionalOnBean(BindableService)`（spike C），不是我们的条件注解；建议设计补一句，避免以后有人把服务改成非 bean 注册。
+6. **T3.1 的 yml 不能平铺在默认文档里**：Boot 4 的 `SslMetricsAutoConfiguration`/`SslMeterBinder` 会在启动时**急切物化所有已配置的 SSL bundle**，于是没有挂证书目录的 mgmt 进程也会因 `FileNotFoundException: /etc/cc/tls/server.crt` 启动失败（实测 `cc-mgmt` exit 1）。落地做法：`spring.grpc.*` 与 `spring.ssl.bundle.*` 放进 `on-profile: control` 的文档，并令 `spring.profiles.active: ${CC_ROLE:mgmt}`，让角色名同时充当 profile——只有 control 读证书，mgmt 连 bundle 都不注册。
+7. **§4.2 的 `attach()` + `finally detach()` 写法在拦截器里不成立**：`Context` 的 attach 只作用于当前线程，gRPC 在 `onHalfClose` 的线程上下文里读不到，服务端会报 `agent identity interceptor did not run`。必须用 `io.grpc.Contexts.interceptCall(context, call, headers, next)`（库内部做 attach/detach）。
 
 ## 11. 待拍板项
 

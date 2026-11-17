@@ -3,6 +3,9 @@
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 
+log "generating development TLS material"
+bash "$(dirname "$0")/dev-certs.sh"
+
 log "building images and starting containers"
 docker compose up -d --build
 

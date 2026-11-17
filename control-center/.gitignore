@@ -3,3 +3,5 @@ web/node_modules/
 web/dist/
 .env
 *.log
+# Local development PKI and other scratch state (scripts/dev-certs.sh output).
+.tmp/
