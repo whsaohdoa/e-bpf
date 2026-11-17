@@ -1,0 +1,61 @@
+[package]
+name = "agent"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[features]
+# The in-process mock control plane (`src/mock/`) is the only way to exercise
+# the client and the state machine without a real server, so it is on by
+# default: `cargo test -p agent --tests` (the `agent` xtask layer) then needs no
+# extra flag. A production build that must not link `rcgen` uses
+# `--no-default-features`, which also drops the `control-mock` binary.
+default = ["mock"]
+mock = ["dep:rcgen", "dep:serde"]
+
+[dependencies]
+# `probe::sink::AggSink` and `probe::aggregate::AggRecord` are the reporting
+# port and row type this crate implements; the control agent never loads eBPF.
+probe = { path = "../probe" }
+probe-common = { path = "../probe-common" }
+async-trait = { workspace = true }
+# `probe-agent` derives its command line and reads `PROBE_AGENT_*` variables.
+clap = { workspace = true, features = ["derive", "env", "help", "usage", "error-context"] }
+# `probe::sink::AggSink` is an `anyhow`-flavoured port, so the sink impl needs it.
+anyhow = { workspace = true }
+env_logger = { workspace = true }
+log = { workspace = true }
+prost = { workspace = true }
+# Referenced by the generated code (`google.protobuf.Timestamp` fields).
+prost-types = { workspace = true }
+rcgen = { workspace = true, optional = true }
+# The `control-mock` binary reads its `--config` file as JSON.
+serde = { workspace = true, optional = true }
+# `probe-agent` persists `applied.json`, so JSON is needed without `mock`.
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "time", "sync", "signal"] }
+tonic = { workspace = true }
+tonic-prost = { workspace = true }
+
+[build-dependencies]
+# `tonic-prost-build` is the prost half of tonic 0.14's code generator; it
+# emits `Encoder`/`Decoder` impls plus the client and server stubs.
+tonic-prost-build = { workspace = true }
+# `build.rs` points the code generator at the bundled `protoc` and its
+# well-known-type includes instead of whatever the host happens to install.
+protoc-bin-vendored = { workspace = true }
+
+[[bin]]
+name = "control-mock"
+path = "src/bin/control-mock.rs"
+required-features = ["mock"]
+
+[[bin]]
+name = "probe-agent"
+path = "src/bin/probe-agent.rs"
+
+[dev-dependencies]
+rcgen = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "time", "sync", "signal"] }

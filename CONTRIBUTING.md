@@ -42,6 +42,11 @@ sudo -E ./target/release/probe --iface veth0 \
   其实没被检查，改过 import 要人工确认。
 - 新依赖加到 `[workspace.dependencies]`，默认 `default-features = false`；不要往 `probe-ebpf`
   引入仅宿主可用的 crate。
+- `agent` 的 `build.rs` 编译 `agent/proto/control.proto`。`protoc` **不在** Rust 工具链里，
+  但构建脚本用的是 `protoc-bin-vendored` 自带的二进制和 well-known-type include，
+  不依赖宿主机装的 protobuf（Ubuntu 上 `protobuf-compiler` 并不带
+  `google/protobuf/timestamp.proto`，带它的是 `libprotobuf-dev`）。所以本地和 CI
+  都不需要额外 `apt-get install`；首次构建会随 Cargo 依赖下载对应平台的 protoc。
 
 ### rust-analyzer 的 E0152
 
@@ -70,8 +75,9 @@ item `panic_impl`”。真实 eBPF 构建使用 `--target bpfel-unknown-none` +
 | L1 | `cargo xtask test --layer l1` | CLI 契约：`probe/tests/csv_schema.rs`（列序、表头、退出码） |
 | L2 | `cargo xtask test --layer l2` | 进程内管线 P-01…P-16：假 AGG map、可脚本化 ringbuf、内存 sink、注入时钟 |
 | L3 | `cargo xtask e2e` | 特权真机驱动 `probe/tests/e2e.rs`，E-01…E-07 |
+| agent | `cargo xtask test --layer agent` | `-p agent --tests`：进程内 TLS 假控制面 + agent 状态机（不需要 root、不碰内核） |
 
-`cargo xtask test`（不带 `--layer`）按 L0→L1→L2 跑全部；优先用 `cargo nextest`
+`cargo xtask test`（不带 `--layer`）按 L0→L1→L2→agent 跑全部；优先用 `cargo nextest`
 （`--profile ci` 额外写 JUnit），未安装时自动回落 `cargo test`。`cargo xtask report`
 汇总上一次 JUnit。`cargo xtask soak` 仍是占位。
 
@@ -139,6 +145,12 @@ probe/src/sink.rs         # Event / Sink / AggSink + 两个 CSV 后端 + 工厂
 probe/tests/csv_schema.rs # L1：CLI/CSV 列序契约
 probe/tests/pipeline.rs   # L2：进程内管线用例
 probe/tests/e2e.rs        # L3：特权真机用例（L0–L2 不跑）
+probe/src/driver.rs       # 可驱动门面：attach/替换配置，`probe` 与 `probe-agent` 共用
+agent/proto/control.proto # 控制面 gRPC 契约（proto 是唯一 schema；说明文档在工作区 docs/）
+agent/src/agent_loop.rs   # 状态机：Register→GetCursor→GetConfig→校验→apply→Ack→心跳/上报/Watch
+agent/src/client/         # `ControlClient`：mTLS 通道与七个 RPC 的类型化封装
+agent/src/mock/           # 进程内假控制面：TLS 服务端、rcgen 证书、HTTP admin（dev-only）
+agent/src/bin/            # `probe-agent`（agent 本体）与 `control-mock`（假控制面）
 testkit/                  # e2e 共用件：AF_PACKET 发帧、veth/命名空间辅助、CSV 断言
 xtask/                    # `cargo xtask`：test / bpf / e2e / send / report / soak / coverage
 scripts/ci/               # run.sh（CI 环境变量）、fmt.sh、install-toolchain.sh、coverage.sh

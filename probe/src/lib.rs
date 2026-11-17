@@ -18,6 +18,7 @@
 //! milliseconds instead of requiring a privileged end-to-end run.
 pub mod aggregate;
 pub mod app;
+pub mod driver;
 pub mod pipeline;
 pub mod ports;
 pub mod sink;

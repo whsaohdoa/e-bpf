@@ -94,3 +94,26 @@ spec:
               app: cc-control
       ports:
         - port: 5432
+
+---
+# The agent control plane will listen on 9090 (gRPC + mTLS). `allow-control-from-mgmt-only`
+# above stays the only rule for 8080 — do not widen it. Agents run outside the cluster (the
+# host's `probe-agent`), so no pod selector can name them: the empty `from` admits any source
+# and the client certificate carries the identity. There is no server on 9090 yet (Train 0
+# only ships the Rust side), so this rule is reserved space for the next branch.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-control-grpc-from-agents
+  namespace: cc-train0
+spec:
+  podSelector:
+    matchLabels:
+      app: cc-control
+  policyTypes:
+    - Ingress
+  ingress:
+    - from: []
+      ports:
+        - port: 9090
+          protocol: TCP

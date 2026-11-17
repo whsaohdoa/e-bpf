@@ -70,6 +70,7 @@ jobs:
               - 'clippy.toml'
               - '.cargo/**'
               - '.config/**'
+              - 'agent/**'
               - 'probe/**'
               - 'probe-common/**'
               - 'probe-ebpf/**'

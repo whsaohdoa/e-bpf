@@ -125,6 +125,39 @@ pub trait AggSink: Send {
     fn flush(&mut self) -> Result<()>;
 }
 
+/// A [`Sink`] that drops every sample.
+///
+/// `probe-agent` uses it when the operator did not ask for CSV files: the
+/// samples still flow through the ring and the de-duplication store, they are
+/// just not persisted.  It never fails, so a session with null sinks only fails
+/// on its real ports (the ring and `AGG`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NullSink;
+
+impl Sink for NullSink {
+    fn write_batch(&mut self, _events: &[Event]) -> Result<()> {
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// An [`AggSink`] that drops every aggregate row.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NullAggSink;
+
+impl AggSink for NullAggSink {
+    fn write_rows(&mut self, _rows: &[AggRecord]) -> Result<()> {
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
 /// Available `--sink` values.  A future `Db` variant only needs a new arm in
 /// [`create_sink`]; the CLI and the eBPF side stay untouched.
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -133,12 +166,15 @@ pub enum SinkKind {
 }
 
 /// Builds the sample sink selected on the command line.
+///
+/// The `Send` half of the return type is what a [`crate::pipeline::Session`]
+/// stores, so the boxed sink can move with the session.
 pub fn create_sink(
     kind: SinkKind,
     path: &Path,
     iface: &str,
     append: bool,
-) -> Result<Box<dyn Sink>> {
+) -> Result<Box<dyn Sink + Send>> {
     match kind {
         SinkKind::Csv => Ok(Box::new(CsvSink::create(path, iface, append)?)),
     }
@@ -155,7 +191,7 @@ pub fn create_agg_sink(
     append: bool,
     config: ProbeConfig,
     clock: Clock,
-) -> Result<Box<dyn AggSink>> {
+) -> Result<Box<dyn AggSink + Send>> {
     Ok(Box::new(AggCsvSink::create(
         path, iface, append, config, clock,
     )?))

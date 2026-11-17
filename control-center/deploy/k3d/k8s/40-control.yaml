@@ -10,6 +10,11 @@ spec:
     - name: http
       port: 8080
       targetPort: http
+    # Agent control plane (gRPC + mTLS). Reserved for the next branch: the
+    # server side does not exist yet, so nothing listens on 9090 today.
+    - name: grpc
+      port: 9090
+      targetPort: grpc
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -36,6 +41,8 @@ spec:
           ports:
             - name: http
               containerPort: 8080
+            - name: grpc
+              containerPort: 9090
           env:
             - name: CC_ROLE
               value: control

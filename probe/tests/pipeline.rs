@@ -16,10 +16,9 @@
 //! timestamp they want.  Nothing here depends on wall-clock scheduling.
 
 use std::{
-    cell::RefCell,
     collections::VecDeque,
     net::{IpAddr, Ipv4Addr},
-    rc::Rc,
+    sync::{Arc, Mutex, MutexGuard},
 };
 
 use anyhow::{Result, bail};
@@ -151,37 +150,43 @@ impl AggStore for FakeKernel {
     }
 }
 
+/// Locks a port mutex, ignoring poisoning: an assertion failure in one test must
+/// not turn every other lock in the same test into a second, confusing panic.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// A cloneable handle to one [`FakeKernel`].
 ///
 /// The ownership is shared so a test can still insert a "late key" while the
 /// session that reads the store is alive; without that, the late-key scenario
-/// would need a second session and lose the reported-window watermark.
+/// would need a second session and lose the reported-window watermark.  The
+/// handle must be `Send` because [`Session`] owns its ports since S-C.
 #[derive(Clone, Default)]
-struct KernelHandle(Rc<RefCell<FakeKernel>>);
+struct KernelHandle(Arc<Mutex<FakeKernel>>);
 
 impl KernelHandle {
     fn insert(&self, key: AggKey, value: AggValue) {
-        self.0.borrow_mut().insert(key, value);
+        lock(&self.0).insert(key, value);
     }
 
     fn distinct_keys(&self) -> usize {
-        self.0.borrow().distinct_keys()
+        lock(&self.0).distinct_keys()
     }
 }
 
 impl AggStore for KernelHandle {
     fn for_each_slot(&mut self, f: &mut dyn FnMut(&AggKey, &AggValue)) {
-        let inner = self.0.borrow();
+        let inner = lock(&self.0);
         for (key, value) in &inner.slots {
             f(key, value);
         }
     }
 
     fn delete(&mut self, key: &AggKey) {
-        self.0
-            .borrow_mut()
-            .slots
-            .retain(|(existing, _)| existing != key);
+        lock(&self.0).slots.retain(|(existing, _)| existing != key);
     }
 
     fn len(&self) -> usize {
@@ -201,23 +206,23 @@ enum Script {
 /// session is draining, which is how the late-sample scenario is scripted.
 #[derive(Clone, Default)]
 struct ScriptedSource {
-    queue: Rc<RefCell<VecDeque<Script>>>,
+    queue: Arc<Mutex<VecDeque<Script>>>,
     current: Vec<u8>,
 }
 
 impl ScriptedSource {
     fn push(&self, record: Vec<u8>) {
-        self.queue.borrow_mut().push_back(Script::Record(record));
+        lock(&self.queue).push_back(Script::Record(record));
     }
 
     fn push_reservation_failed(&self) {
-        self.queue.borrow_mut().push_back(Script::ReservationFailed);
+        lock(&self.queue).push_back(Script::ReservationFailed);
     }
 }
 
 impl SampleSource for ScriptedSource {
     fn next_record(&mut self) -> Poll<'_> {
-        let next = self.queue.borrow_mut().pop_front();
+        let next = lock(&self.queue).pop_front();
         match next {
             None => Poll::Empty,
             Some(Script::ReservationFailed) => Poll::ReservationFailed,
@@ -233,8 +238,12 @@ impl SampleSource for ScriptedSource {
 
 /// Both CSV sinks, in memory.  `fail_write`/`fail_flush` make the exit path take
 /// its error branch, which must still name the file.
+///
+/// The state sits behind `Arc<Mutex<…>>` for two reasons: the session owns its
+/// sinks since S-C (`Box<dyn Sink + Send>`), and the assertions run after the
+/// session has been dropped while the rows must survive it.
 #[derive(Default)]
-struct MemSink {
+struct SinkState {
     events: Vec<Event>,
     rows: Vec<AggRecord>,
     flushes: u32,
@@ -243,51 +252,70 @@ struct MemSink {
     path: String,
 }
 
+#[derive(Clone, Default)]
+struct MemSink(Arc<Mutex<SinkState>>);
+
 impl MemSink {
     fn failing(path: &str) -> Self {
-        Self {
+        Self(Arc::new(Mutex::new(SinkState {
             fail_write: true,
             path: path.to_owned(),
-            ..Self::default()
-        }
+            ..SinkState::default()
+        })))
+    }
+
+    fn events(&self) -> Vec<Event> {
+        lock(&self.0).events.clone()
+    }
+
+    fn rows(&self) -> Vec<AggRecord> {
+        lock(&self.0).rows.clone()
+    }
+
+    fn flushes(&self) -> u32 {
+        lock(&self.0).flushes
     }
 }
 
 impl Sink for MemSink {
     fn write_batch(&mut self, events: &[Event]) -> Result<()> {
-        if self.fail_write {
-            bail!("write sample CSV row to {}: simulated failure", self.path);
+        let mut state = lock(&self.0);
+        if state.fail_write {
+            bail!("write sample CSV row to {}: simulated failure", state.path);
         }
-        self.events.extend_from_slice(events);
+        state.events.extend_from_slice(events);
         Ok(())
     }
 
     fn flush(&mut self) -> Result<()> {
-        if self.fail_flush {
-            bail!("flush sample CSV file {}: simulated failure", self.path);
+        let mut state = lock(&self.0);
+        if state.fail_flush {
+            bail!("flush sample CSV file {}: simulated failure", state.path);
         }
-        self.flushes += 1;
+        state.flushes += 1;
         Ok(())
     }
 }
 
 impl AggSink for MemSink {
     fn write_rows(&mut self, rows: &[AggRecord]) -> Result<()> {
-        if self.fail_write {
+        let mut state = lock(&self.0);
+        if state.fail_write {
             bail!(
                 "write aggregate CSV row to {}: simulated failure",
-                self.path
+                state.path
             );
         }
-        self.rows.extend_from_slice(rows);
+        state.rows.extend_from_slice(rows);
         Ok(())
     }
 
     fn flush(&mut self) -> Result<()> {
-        if self.fail_flush {
-            bail!("flush aggregate CSV file {}: simulated failure", self.path);
+        let mut state = lock(&self.0);
+        if state.fail_flush {
+            bail!("flush aggregate CSV file {}: simulated failure", state.path);
         }
-        self.flushes += 1;
+        state.flushes += 1;
         Ok(())
     }
 }
@@ -340,15 +368,16 @@ impl Harness {
 
     /// Builds a session over the fake ports.
     ///
-    /// The session borrows the harness, so the state that must survive several
-    /// ticks (the merge table, the de-duplication store) lives in the session
-    /// while the ports stay outside: no self-referential struct is needed.
-    fn session(&mut self) -> Session<'_> {
+    /// The session owns boxed, `Send` handles to the ports, so the state that
+    /// must survive several ticks (the merge table, the de-duplication store)
+    /// lives in the session while the rows written through the sinks stay
+    /// observable in the harness after the session is dropped.
+    fn session(&mut self) -> Session {
         Session::new(
-            &mut self.kernel,
-            &mut self.source,
-            &mut self.sink,
-            &mut self.agg_sink,
+            Box::new(self.kernel.clone()),
+            Box::new(self.source.clone()),
+            Box::new(self.sink.clone()),
+            Box::new(self.agg_sink.clone()),
             self.config,
             self.clock,
         )
@@ -418,7 +447,7 @@ impl Harness {
     /// whether a key is late only exists for the lifetime of the session.
     fn finish_after(
         &mut self,
-        before: impl FnOnce(&mut Session<'_>) -> Result<()>,
+        before: impl FnOnce(&mut Session) -> Result<()>,
     ) -> Result<Finished> {
         let summary = {
             let mut session = self.session();
@@ -431,19 +460,19 @@ impl Harness {
     fn snapshot(&self, summary: Summary) -> Finished {
         Finished {
             summary,
-            samples: self.sink.events.clone(),
-            aggs: self.agg_sink.rows.clone(),
+            samples: self.sink.events(),
+            aggs: self.agg_sink.rows(),
             clock: self.clock,
             window_ns: self.config.window_ns,
         }
     }
 
-    fn aggs(&self) -> &[AggRecord] {
-        &self.agg_sink.rows
+    fn aggs(&self) -> Vec<AggRecord> {
+        self.agg_sink.rows()
     }
 
-    fn samples(&self) -> &[Event] {
-        &self.sink.events
+    fn samples(&self) -> Vec<Event> {
+        self.sink.events()
     }
 }
 
@@ -477,7 +506,7 @@ fn p01_one_window_one_key() -> Result<()> {
     assert_eq!(finished.summary.stats.events_received, 3);
     assert_eq!(finished.summary.stats.agg_records, 1);
     assert!(
-        harness.sink.flushes >= 2,
+        harness.sink.flushes() >= 2,
         "both sinks are flushed on a normal exit"
     );
     Ok(())
@@ -1110,5 +1139,99 @@ fn block_keys_keep_the_sixteen_column_schema() -> Result<()> {
     assert_eq!(row.key.rule_id, 7);
     assert_eq!(row.key.direction, DIRECTION_INGRESS);
     assert_eq!(row.key.family, FAMILY_IPV4);
+    Ok(())
+}
+
+/// S-C: `set_config` only swaps the configuration.  A window that was already
+/// bucketed under the old `window_ns` must keep that boundary: the rows taken
+/// before the switch stay in window 0, while traffic ingested afterwards is
+/// bucketed with the new width (6ms is window 1 under 5ms windows).
+#[test]
+fn set_config_keeps_the_window_rows_were_bucketed_with() -> Result<()> {
+    const OLD_WINDOW: u64 = 10;
+    const NEW_WINDOW: u64 = 5;
+
+    let mut harness = Harness::new(config(OLD_WINDOW, 1));
+    harness.sample(ms(1)).slot(ms(1), slot(1, ms(1), ms(1)));
+
+    // A second flow, so the de-duplication store never confuses the two rows.
+    let late = sample(
+        ms(6),
+        ms(NEW_WINDOW),
+        ipv4(10, 99, 0, 2),
+        ipv4(10, 99, 0, 1),
+        8443,
+        6,
+    );
+    let source = harness.source.clone();
+    let kernel = harness.kernel.clone();
+    let new_config = config(NEW_WINDOW, 1);
+    kernel.insert(
+        AggKey::from_sample(&late, &new_config),
+        slot(1, ms(6), ms(6)),
+    );
+
+    {
+        let mut session = harness.session();
+        session.drain_ring();
+        // The old window is written with the 10ms width it was bucketed with.
+        session.flush_pending()?;
+        assert_eq!(harness.aggs()[0].window_id, 0);
+
+        session.set_config(new_config);
+        source.push(record_of(&late));
+        session.drain_ring();
+        session.flush_pending()?;
+    }
+
+    let rows = harness.aggs();
+    assert_eq!(rows.len(), 2, "one row per flow: {rows:?}");
+    // `dst_port` is stored in network byte order in `AggKey`.
+    let new_row = rows
+        .iter()
+        .find(|row| row.key.dst_port == 8443u16.to_be())
+        .expect("the row of the new configuration");
+    let old_row = rows
+        .iter()
+        .find(|row| row.key.dst_port == 443u16.to_be())
+        .expect("the row of the old configuration");
+    assert_eq!(old_row.window_id, 0, "the old window keeps its boundary");
+    assert_eq!(new_row.window_id, 1, "6ms is window 1 under 5ms windows");
+    Ok(())
+}
+
+/// S-C: `flush_pending` writes every open window with `window_complete = 0`, and
+/// `shutdown` must not write the same rows a second time (it reuses
+/// `flush_pending` after its final drain).
+#[test]
+fn flush_pending_writes_open_windows_once() -> Result<()> {
+    let mut harness = Harness::new(config(10, 1));
+    harness.sample(ms(1)).slot(ms(1), slot(2, ms(1), ms(2)));
+
+    let (summary, after_flush) = {
+        let mut session = harness.session();
+        session.drain_ring();
+        session.flush_pending()?;
+        let after_flush = (harness.aggs().len(), harness.samples().len());
+
+        let summary = session.shutdown(KernelCounters::default)?;
+        // A second flush has nothing left to write.
+        session.flush_pending()?;
+        (summary, after_flush)
+    };
+
+    assert_eq!(
+        after_flush,
+        (1, 1),
+        "the open window is written immediately"
+    );
+    assert_eq!(harness.aggs().len(), 1, "shutdown must not rewrite the row");
+    assert_eq!(harness.samples().len(), 1, "nor the sample");
+    assert!(
+        !harness.aggs()[0].window_complete,
+        "an early flush is never a closed window"
+    );
+    assert_eq!(summary.stats.agg_records, 1);
+    assert_eq!(summary.stats.sample_rows, 1);
     Ok(())
 }

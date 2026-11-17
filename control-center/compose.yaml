@@ -80,6 +80,9 @@ services:
       CC_MIGRATOR_PASSWORD: ${CC_MIGRATOR_PASSWORD:-cc_migrator}
     ports:
       - "127.0.0.1:${CC_CONTROL_PORT:-8082}:8080"
+      # agent gRPC + mTLS endpoint (Train 0 has no server behind it yet, so the
+      # port is published for the next branch and for local smoke tests).
+      - "127.0.0.1:${CC_CONTROL_GRPC_PORT:-9090}:9090"
     depends_on:
       cc-pg:
         condition: service_healthy
