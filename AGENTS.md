@@ -89,3 +89,13 @@ cargo xtask soak --minutes N             # 占位，未实现
 | Train 0 计划（仓库外） | 工作区 `docs/Train0-Plan-6x1.md` |
 
 工作区外层的 `AGENTS.md` 只是指向本文件的指针；内容以本文件为准。
+
+## 8. 省 token（硬约束）
+
+每个工具调用都是一次全量上下文重发，**总消耗 ≈ 请求数 × 上下文**；完整规则见 `token-efficient-repo-work` skill。在本仓库干活额外要求：
+
+- 读文件先 `grep`/`glob` 定位，`read` 带 `offset`/`limit`；>300 行禁止整读，读过的文件不整篇重读（复查用 `grep` 定点）。
+- 命令输出只取字段或尾部：`Select-String`、`Select-Object -First N`、`-DoutputFile=` 后只看命中行；单次工具输出 ≤50 行或 ~2K token，禁止倒整份 `dependency:tree`/`inspect`/`jar tf`/metadata JSON。
+- 同一文件的多处改动合并成一次 `edit`（或一次脚本批量替换）；互相独立的 `read`/`grep`/`docker` 调用放同一条消息并行发出。
+- 串读 10+ 文件或单文件 >300 行的提炼交 `subagent`；长结论落盘（`docs/`、`.tmp/`），后续从文件定点取用。
+- 上下文到 ~60K 就 `compress`，摘要只留可执行事实；不要中断在途请求后立刻重发。
