@@ -1,0 +1,6 @@
+schema_version: 1
+window_ms: 10000
+grace_ms: 2000
+src_prefix_v4: 24
+src_prefix_v6: 64
+default_action: DEFAULT_ACTION_PASS

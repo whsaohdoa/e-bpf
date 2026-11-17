@@ -1,0 +1,20 @@
+schema_version: 1
+window_ms: 10000
+grace_ms: 2000
+src_prefix_v4: 24
+src_prefix_v6: 64
+default_action: DEFAULT_ACTION_PASS
+rules {
+  rule_index: 1
+  rule_id: "r-8080"
+  priority: 10
+  enabled: true
+  match {
+    family: FAMILY_IPV4
+    protocol: L4_PROTOCOL_TCP
+    src_prefix: "10.0.1.0/24"
+    dst_addr: "10.0.2.5"
+    dst_ports: 8080
+  }
+  action: ACTION_BLOCK
+}
