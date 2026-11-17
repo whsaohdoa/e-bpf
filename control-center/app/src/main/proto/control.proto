@@ -1,0 +1,321 @@
+syntax = "proto3";
+
+package control.agent.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option java_package = "io.probe.control.agent.v1";
+option java_multiple_files = true;
+option java_outer_classname = "AgentControlProto";
+
+// Agent <-> control-center contract, Train 0 / v1.
+// Transport: HTTP/2 + mutual TLS on a dedicated port (9090).
+// Semantics live in docs/Control-Agent-API-v1.md; this file is the normative shape.
+service AgentControl {
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc GetConfig(GetConfigRequest) returns (GetConfigResponse);
+  rpc AckConfig(AckConfigRequest) returns (AckConfigResponse);
+  rpc ReportWindows(ReportWindowsRequest) returns (ReportWindowsResponse);
+  rpc GetCursor(GetCursorRequest) returns (GetCursorResponse);
+  rpc Watch(WatchRequest) returns (stream ConfigNotification);
+}
+
+// ---------------------------------------------------------------------------
+// Enums whose zero value is a real ABI value (they mirror probe-common).
+// 0 is therefore meaningful and must never be treated as "unset".
+// ---------------------------------------------------------------------------
+
+// Mirrors AggKey.family.
+enum Family {
+  FAMILY_ANY = 0;
+  FAMILY_IPV4 = 4;
+  FAMILY_IPV6 = 6;
+}
+
+// Mirrors AggKey.protocol (IANA protocol numbers).
+enum L4Protocol {
+  L4_PROTOCOL_ANY = 0;
+  L4_PROTOCOL_ICMP = 1;
+  L4_PROTOCOL_TCP = 6;
+  L4_PROTOCOL_UDP = 17;
+  L4_PROTOCOL_ICMPV6 = 58;
+}
+
+// Mirrors AggKey.action (ACTION_PASS = 0, ACTION_BLOCK = 1).
+enum Action {
+  ACTION_PASS = 0;
+  ACTION_BLOCK = 1;
+}
+
+// Mirrors ProbeConfig.default_action (pass = 0, drop = 1).
+enum DefaultAction {
+  DEFAULT_ACTION_PASS = 0;
+  DEFAULT_ACTION_DROP = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Enums where 0 means "not set" and is rejected by validation.
+// ---------------------------------------------------------------------------
+
+enum AgentStatus {
+  AGENT_STATUS_UNSPECIFIED = 0;
+  AGENT_STATUS_ACTIVE = 1;
+  AGENT_STATUS_REVOKED = 2;
+  AGENT_STATUS_PENDING = 3;
+}
+
+enum ConfigState {
+  CONFIG_STATE_UNSPECIFIED = 0;
+  CONFIG_STATE_MISSING = 1;
+  CONFIG_STATE_APPLYING = 2;
+  CONFIG_STATE_APPLIED = 3;
+  CONFIG_STATE_REJECTED = 4;
+}
+
+enum AckResult {
+  ACK_RESULT_UNSPECIFIED = 0;
+  ACK_RESULT_APPLIED = 1;
+  ACK_RESULT_REJECTED = 2;
+  ACK_RESULT_FAILED = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Capabilities and registration
+// ---------------------------------------------------------------------------
+
+message Capabilities {
+  // Supported document schema_version values. Train 0: [1].
+  repeated uint32 config_schema = 1;
+  // Supported default_action values. Train 0: [DEFAULT_ACTION_PASS].
+  repeated DefaultAction default_action = 2;
+  // Whether the agent can enforce rules. Train 0: false.
+  bool rules_execution = 3;
+}
+
+message RegisterRequest {
+  // Stable host identity (machine-id / serial). 1..128 chars.
+  string machine_id = 1;
+  // Semver of the agent binary.
+  string agent_version = 2;
+  // Random per process start; for log correlation only, never part of an id.
+  string boot_id = 3;
+  Capabilities capabilities = 4;
+}
+
+message RegisterResponse {
+  // Derived from the client certificate CN; never from the request body.
+  string agent_id = 1;
+  string machine_id = 2;
+  string group_id = 3;
+  AgentStatus status = 4;
+  // 0 = no config published for this group yet.
+  uint64 desired_version = 5;
+  // 32 bytes; empty when desired_version = 0.
+  bytes desired_sha256 = 6;
+  // Interval while lagging (desired != applied).
+  uint32 heartbeat_interval_ms = 7;
+  // Interval once caught up.
+  uint32 idle_heartbeat_interval_ms = 8;
+  google.protobuf.Timestamp server_time = 9;
+  // Control plane's view of what this agent can actually apply.
+  Capabilities effective_capabilities = 10;
+}
+
+// ---------------------------------------------------------------------------
+// Heartbeat
+// ---------------------------------------------------------------------------
+
+message HeartbeatRequest {
+  uint64 current_version = 1;
+  ConfigState config_state = 2;
+  // Largest window id already acknowledged by the control plane (agent's view).
+  uint64 last_reported_window_id = 3;
+  uint32 pending_reports = 4;
+  // True while a Watch stream is established.
+  bool watch_connected = 5;
+  google.protobuf.Timestamp agent_time = 6;
+}
+
+message HeartbeatResponse {
+  uint64 desired_version = 1;
+  bytes desired_sha256 = 2;
+  uint32 heartbeat_interval_ms = 3;
+  uint32 idle_heartbeat_interval_ms = 4;
+  google.protobuf.Timestamp server_time = 5;
+}
+
+// ---------------------------------------------------------------------------
+// Config pull
+// ---------------------------------------------------------------------------
+
+message GetConfigRequest {
+  uint64 current_version = 1;
+}
+
+message GetConfigResponse {
+  // True: nothing newer than current_version. Not an error.
+  bool up_to_date = 1;
+  // Present only when up_to_date = false.
+  ConfigEnvelope config = 2;
+}
+
+message ConfigEnvelope {
+  uint64 version = 1;
+  uint32 schema_version = 2;
+  // sha256 of `document`, 32 bytes. The agent hashes the received bytes as-is.
+  bytes content_sha256 = 3;
+  // Serialized ConfigDocument. Opaque to the agent: parse, never re-encode for hashing.
+  bytes document = 4;
+  google.protobuf.Timestamp published_at = 5;
+}
+
+message ConfigDocument {
+  uint32 schema_version = 1;
+  uint32 window_ms = 2;
+  uint32 grace_ms = 3;
+  uint32 src_prefix_v4 = 4;
+  uint32 src_prefix_v6 = 5;
+  DefaultAction default_action = 6;
+  repeated Rule rules = 7;
+}
+
+message Rule {
+  // 1-based position; must equal (index in `rules` + 1). 0 is never valid here.
+  uint32 rule_index = 1;
+  // ^[a-z0-9][a-z0-9._-]{0,31}$, unique within the document.
+  string rule_id = 2;
+  // 1..1000, unique within the document; lower matches first.
+  uint32 priority = 3;
+  bool enabled = 4;
+  RuleMatch match = 5;
+  Action action = 6;
+}
+
+message RuleMatch {
+  Family family = 1;
+  L4Protocol protocol = 2;
+  // CIDR text, e.g. "10.0.1.0/24". Absent = any.
+  optional string src_prefix = 3;
+  // Single address text, e.g. "10.0.2.5". Absent = any.
+  optional string dst_addr = 4;
+  // 1..65535. Empty = any.
+  repeated uint32 dst_ports = 5;
+}
+
+// ---------------------------------------------------------------------------
+// Config ack
+// ---------------------------------------------------------------------------
+
+message AckConfigRequest {
+  uint64 version = 1;
+  bytes content_sha256 = 2;
+  AckResult result = 3;
+  // Agent wall clock; for the human timeline only.
+  google.protobuf.Timestamp applied_at = 4;
+  uint32 apply_ms = 5;
+  // Features the agent accepted but cannot enforce, e.g. ["rules"].
+  repeated string degraded_features = 6;
+  // One of the contract error codes; required when result != APPLIED.
+  string error_code = 7;
+  // Human readable, <= 512 chars.
+  string error_detail = 8;
+}
+
+message AckConfigResponse {
+  bool recorded = 1;
+  uint64 desired_version = 2;
+  // Control-plane clock; G1 is measured from this.
+  google.protobuf.Timestamp received_at = 3;
+  google.protobuf.Timestamp server_time = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Reports
+// ---------------------------------------------------------------------------
+
+message ReportWindowsRequest {
+  // 1..1000 windows per call (see limits in the contract).
+  repeated WindowReport windows = 1;
+}
+
+message WindowReport {
+  // Monotonic window index: ts_ns / window_ns. Not wall clock.
+  uint64 window_id = 1;
+  uint32 window_ms = 2;
+  // false = partial window cut by shutdown or grace timeout.
+  bool complete = 3;
+  // Estimated wall clock of the window start (send-time wall clock minus the
+  // monotonic offset). For display only; alignment always uses window_id.
+  google.protobuf.Timestamp window_start = 4;
+  repeated Aggregate aggregates = 5;
+  // Set only if the agent had to truncate this window to fit the batch limit.
+  bool truncated = 6;
+  repeated Sample samples = 7;
+}
+
+message Aggregate {
+  // 32 black-box bytes, see key_hash layout in the contract.
+  bytes key_hash = 1;
+  // AggValue.count
+  uint64 packets = 2;
+  // AggValue.first_seen relative to window_id * window_ms.
+  uint64 first_seen_offset_ns = 3;
+  // AggValue.last_seen relative to window_id * window_ms.
+  uint64 last_seen_offset_ns = 4;
+  // AggValue.sample_dropped
+  bool sample_dropped = 5;
+  // AggValue.degraded (classification degraded, unrelated to ack.degraded_features)
+  bool degraded = 6;
+}
+
+message Sample {
+  // Optional but strongly recommended: links the sample to an aggregate row.
+  bytes key_hash = 1;
+  // Display only, e.g. "10.0.1.7:53124 -> 10.0.2.5:8080 tcp".
+  string five_tuple = 2;
+  // Relative to window_id * window_ms.
+  uint64 ts_offset_ns = 3;
+}
+
+message RejectedWindow {
+  uint64 window_id = 1;
+  string error_code = 2;
+}
+
+message ReportWindowsResponse {
+  uint32 accepted = 1;
+  uint32 duplicates = 2;
+  uint32 rejected = 3;
+  repeated RejectedWindow rejected_windows = 4;
+  // Largest window id fully committed. Echoed so the agent can advance its cursor.
+  uint64 last_window_id = 5;
+  google.protobuf.Timestamp server_time = 6;
+}
+
+// ---------------------------------------------------------------------------
+// Cursor
+// ---------------------------------------------------------------------------
+
+message GetCursorRequest {}
+
+message GetCursorResponse {
+  // Absent = this agent never delivered a window (start from 0).
+  optional uint64 last_window_id = 1;
+  google.protobuf.Timestamp server_time = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Push (Watch). Train 0: the control plane MAY answer UNIMPLEMENTED; agents
+// must fall back to heartbeat polling and retry with a long backoff.
+// ---------------------------------------------------------------------------
+
+message WatchRequest {
+  uint64 current_version = 1;
+}
+
+message ConfigNotification {
+  uint64 version = 1;
+  bytes content_sha256 = 2;
+  google.protobuf.Timestamp issued_at = 3;
+}

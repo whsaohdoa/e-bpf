@@ -46,6 +46,9 @@ jobs:
           filters: |
             cc:
               - 'control-center/**'
+              # The proto the control plane compiles is a copy of this file; editing it must
+              # run the byte-for-byte drift gate below, not silently skip this workflow.
+              - 'agent/proto/**'
               - '.github/workflows/control-center.yml'
 
   build:
@@ -65,11 +68,17 @@ jobs:
           java-version: '21'
           cache: maven
 
-      - name: 后端打包（跳过测试）
+      - name: proto 同源门禁
+        # agent/proto/control.proto 是唯一来源，control-center 里的副本必须逐字节相同；
+        # 两侧生成类型靠字段号对齐，漂移必须在这里挂，不能等联调。
+        run: bash control-center/scripts/proto-check.sh
+
+      - name: 后端打包
         working-directory: control-center/app
-        # `-DskipTests`：`src/test` 目前不存在，这一层还没有测试可跑；等 S1-2 补上
-        # 再把它去掉。`-ntp` 只是让日志里没有下载进度条。
-        run: mvn -B -ntp -DskipTests package
+        # 测试自本分支起存在（ProtoVectorTest 等），所以不再 `-DskipTests`；
+        # 需要真 PG 的用例靠 @EnabledIfEnvironmentVariable(CC_IT_PG) 在 CI 自动跳过。
+        # `-ntp` 只是让日志里没有下载进度条。
+        run: mvn -B -ntp package
 
       - name: 安装 Node 22
         uses: actions/setup-node@v4
