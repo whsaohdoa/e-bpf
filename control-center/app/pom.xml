@@ -47,9 +47,22 @@
       <artifactId>postgresql</artifactId>
       <scope>runtime</scope>
     </dependency>
+    <!-- Native gRPC server for the control role (9090, mTLS). The version comes from the
+         Boot BOM; do not import spring-grpc-dependencies on top of it. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-grpc-server</artifactId>
+    </dependency>
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <!-- Test transport support (@AutoConfigureTestGrpcTransport / @LocalGrpcServerPort);
+         never shipped in the runtime image. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-grpc-server-test</artifactId>
       <scope>test</scope>
     </dependency>
   </dependencies>
@@ -59,6 +72,15 @@
       <plugin>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-maven-plugin</artifactId>
+      </plugin>
+      <!-- Generates Java messages + gRPC stubs from app/src/main/proto/control.proto.
+           Only the declaration is needed: spring-boot-starter-parent already pins the plugin
+           (5.1.11), binds its `generate` execution, sets <protoc> to ${protobuf-java.version}
+           (4.36.2) and registers protoc-gen-grpc-java ${grpc-java.version} (1.84.1) with
+           @generated=omit. Restating that config here made Maven run protoc twice. -->
+      <plugin>
+        <groupId>io.github.ascopes</groupId>
+        <artifactId>protobuf-maven-plugin</artifactId>
       </plugin>
       <!-- Same Liquibase version as the runtime (managed by the Boot BOM), so the up/down
            demo in the acceptance script cannot drift from what the service actually runs. -->
