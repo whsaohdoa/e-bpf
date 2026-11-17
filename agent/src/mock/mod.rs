@@ -46,6 +46,8 @@ use crate::client::tonic::{ClientConfig, ERROR_CODE_HEADER};
 use crate::error::ServerErrorCode;
 use crate::pb;
 
+mod admin;
+
 /// Heartbeat interval the mock hands out when the config does not say.
 pub const DEFAULT_HEARTBEAT_INTERVAL_MS: u32 = 1_000;
 
@@ -94,6 +96,18 @@ pub struct MockConfig {
     /// Report `AGENT_STATUS_REVOKED` (§5.2) so the agent must stop reporting and
     /// exit non-zero while leaving the data path alone.
     pub revoked: bool,
+    /// Hex-encoded `ConfigDocument` published by `serve()` before the first
+    /// client connects. Only the `control-mock` binary uses it: a human starts
+    /// the mock, then the agent, and the agent has something to pull and ack
+    /// without a second terminal. Tests publish through [`MockShared`].
+    pub initial_document_hex: Option<String>,
+    /// Version the startup document is published as; defaults to
+    /// `max(desired_version, 1)`.
+    pub initial_version: Option<u64>,
+    /// Optional plaintext HTTP admin listener (`GET /health`, `POST /publish`,
+    /// `GET /acks`, `GET /state`). Loopback only in practice; the admin surface
+    /// is unauthenticated test scaffolding and must never be exposed.
+    pub admin_listen: Option<SocketAddr>,
 }
 
 impl Default for MockConfig {
@@ -108,6 +122,9 @@ impl Default for MockConfig {
             agent_id: DEFAULT_AGENT_ID.to_string(),
             group_id: DEFAULT_GROUP_ID.to_string(),
             revoked: false,
+            initial_document_hex: None,
+            initial_version: None,
+            admin_listen: None,
         }
     }
 }
@@ -132,6 +149,49 @@ struct Published {
     published_at: u64,
 }
 
+/// What a publish did, so the admin surface can report the exact moment and
+/// hash a human is timing against.
+#[derive(Clone, Debug)]
+pub struct PublishOutcome {
+    /// Version the document was published as.
+    pub version: u64,
+    /// `unix_ms` at which the document became visible to `GetConfig`. This is
+    /// the `published_at` G1 starts from (§9).
+    pub published_at_ms: u64,
+    /// SHA-256 of the served bytes.
+    pub sha256: Vec<u8>,
+    /// How many open `Watch` streams were told about it.
+    pub watchers: usize,
+}
+
+/// One `AckConfig` as the control plane saw it, with the two timestamps G1
+/// needs: when it was received, and when the agent says it applied the config.
+#[derive(Clone, Debug)]
+pub struct AckRecord {
+    /// Acknowledged config version.
+    pub version: u64,
+    /// `AckResult` as the wire enum's integer (1 = applied, 2 = rejected, 3 =
+    /// failed).
+    pub result: i32,
+    /// Agent-reported apply duration.
+    pub apply_ms: u32,
+    /// Features the agent accepted but cannot enforce (Train 0: `["rules"]`).
+    pub degraded_features: Vec<String>,
+    /// Contract error code, empty unless the result was not APPLIED.
+    pub error_code: String,
+    /// SHA-256 of the document bytes the agent says it received, hex. It must
+    /// equal the hash of what was published: the agent hashes the bytes it was
+    /// served and never re-encodes them (§6.4).
+    pub content_sha256_hex: String,
+    /// Agent wall clock (`applied_at`), in unix milliseconds.
+    pub applied_at_ms: Option<u64>,
+    /// Control-plane wall clock at which the ack arrived.
+    pub received_at_ms: u64,
+    /// Whether a `Watch` notification for this version reached a subscriber
+    /// before the ack did. `false` means heartbeat polling found the version.
+    pub after_watch_push: bool,
+}
+
 /// What `Register`/`Heartbeat` announce about the desired config.
 #[derive(Clone, Debug, Default)]
 struct Announcement {
@@ -146,8 +206,18 @@ struct State {
     failures: [VecDeque<Status>; 7],
     delays: [VecDeque<Duration>; 7],
     acks: Vec<pb::AckConfigRequest>,
+    /// `unix_ms` at which each entry of `acks` was received; G1 is measured from
+    /// here (§9: the control plane's `received_at`, not the agent's clock).
+    ack_received_at: Vec<u64>,
     heartbeats: Vec<pb::HeartbeatRequest>,
     reports: Vec<pb::ReportWindowsRequest>,
+    /// Receive time and window ids of every `ReportWindows`, in order. The ids
+    /// are what makes "resumed at cursor + 1" checkable from the outside.
+    report_received_at: Vec<(u64, Vec<u64>)>,
+    /// Every `Watch` notification that actually reached a subscriber, as
+    /// `(version, unix_ms)`. An ack that follows one of these was push-driven;
+    /// the rest were found by heartbeat polling.
+    watch_pushes: Vec<(u64, u64)>,
     /// Committed rows, keyed exactly like §5.5's upsert key.
     committed: HashSet<(u64, Vec<u8>)>,
     /// Highest committed window id; `None` means "nothing committed yet".
@@ -300,29 +370,49 @@ impl MockShared {
     ///
     /// The announced hash is the control plane's job (§5.3 step 3), so it is
     /// computed here, over the exact bytes that will be served.
-    pub fn publish(&self, version: u64, document: pb::ConfigDocument) {
+    pub fn publish(&self, version: u64, document: pb::ConfigDocument) -> PublishOutcome {
         let bytes = document.encode_to_vec();
         let sha256 = Sha256::digest(&bytes).to_vec();
-        self.publish_bytes(version, bytes, sha256);
+        self.publish_bytes(version, bytes, sha256)
+    }
+
+    /// Publishes a document the caller already encoded, so the served bytes are
+    /// byte-identical to what a real control plane would have stored (and the
+    /// hash is over those bytes, not over a re-encoding). `hex` is validated by
+    /// decoding it, but stored as given.
+    pub fn publish_hex(&self, version: u64, hex: &str) -> Result<PublishOutcome, String> {
+        let bytes = decode_hex(hex)?;
+        let document = pb::ConfigDocument::decode(bytes.as_slice())
+            .map_err(|error| format!("document hex is not a ConfigDocument: {error}"))?;
+        // The decoded struct is only used to prove the bytes parse; the bytes
+        // themselves are what `GetConfig` serves.
+        let _ = document;
+        let sha256 = Sha256::digest(&bytes).to_vec();
+        Ok(self.publish_bytes(version, bytes, sha256))
     }
 
     /// Publishes `document` while announcing a hash that does not match it, so
     /// the agent's integrity check has something to reject.
-    pub fn publish_corrupt_hash(&self, version: u64, document: pb::ConfigDocument) {
+    pub fn publish_corrupt_hash(
+        &self,
+        version: u64,
+        document: pb::ConfigDocument,
+    ) -> PublishOutcome {
         let bytes = document.encode_to_vec();
         let mut sha256 = Sha256::digest(&bytes).to_vec();
         sha256[0] ^= 0xff;
-        self.publish_bytes(version, bytes, sha256);
+        self.publish_bytes(version, bytes, sha256)
     }
 
-    fn publish_bytes(&self, version: u64, document: Vec<u8>, sha256: Vec<u8>) {
+    fn publish_bytes(&self, version: u64, document: Vec<u8>, sha256: Vec<u8>) -> PublishOutcome {
         let published_at = unix_ms();
+        let delivered;
         {
             let mut state = self.lock();
             state.announced_version = state.announced_version.max(version);
             state.published = Some(Published {
                 version,
-                sha256,
+                sha256: sha256.clone(),
                 document,
                 published_at,
             });
@@ -332,6 +422,18 @@ impl MockShared {
             state
                 .watchers
                 .retain(|watcher| watcher.send(version).is_ok());
+            delivered = state.watchers.len();
+            if delivered > 0 {
+                // Recorded after the send: an ack can only follow delivery, so
+                // the timestamp order (push, then ack) holds by construction.
+                state.watch_pushes.push((version, published_at));
+            }
+        }
+        PublishOutcome {
+            version,
+            published_at_ms: published_at,
+            sha256,
+            watchers: delivered,
         }
     }
 
@@ -341,6 +443,10 @@ impl MockShared {
         state
             .watchers
             .retain(|watcher| watcher.send(version).is_ok());
+        let delivered = state.watchers.len();
+        if delivered > 0 {
+            state.watch_pushes.push((version, unix_ms()));
+        }
     }
 
     /// Announces `version` to `Register`/`Heartbeat`/`GetConfig` while keeping
@@ -369,6 +475,55 @@ impl MockShared {
     /// Every `AckConfig` the agent sent, in order.
     pub fn acks(&self) -> Vec<pb::AckConfigRequest> {
         self.lock().acks.clone()
+    }
+
+    /// Every ack with the control plane's receive time and whether a `Watch`
+    /// push preceded it. This is the measurement the G1 script reads.
+    pub fn ack_records(&self) -> Vec<AckRecord> {
+        let state = self.lock();
+        state
+            .acks
+            .iter()
+            .zip(state.ack_received_at.iter())
+            .map(|(ack, received_at)| {
+                let pushed = state.watch_pushes.iter().any(|(version, at): &(u64, u64)| {
+                    *version == ack.version && *at <= *received_at
+                });
+                AckRecord {
+                    version: ack.version,
+                    result: ack.result,
+                    apply_ms: ack.apply_ms,
+                    degraded_features: ack.degraded_features.clone(),
+                    error_code: ack.error_code.clone(),
+                    content_sha256_hex: to_hex(&ack.content_sha256),
+                    applied_at_ms: ack.applied_at.as_ref().map(unix_ms_of),
+                    received_at_ms: *received_at,
+                    after_watch_push: pushed,
+                }
+            })
+            .collect()
+    }
+
+    /// Every `Watch` notification that reached a subscriber, as
+    /// `(version, unix_ms)`.
+    pub fn watch_pushes(&self) -> Vec<(u64, u64)> {
+        self.lock().watch_pushes.clone()
+    }
+
+    /// Receive time and window ids of every `ReportWindows`, in order.
+    pub fn report_records(&self) -> Vec<(u64, Vec<u64>)> {
+        self.lock().report_received_at.clone()
+    }
+
+    /// How many `Watch` subscriptions were established (successful calls only).
+    pub fn watch_subscriptions(&self) -> usize {
+        self.lock().watch_subscriptions
+    }
+
+    /// The version `Register`/`Heartbeat` currently announce, if any.
+    pub fn announced_version(&self) -> u64 {
+        let state = self.lock();
+        state.announcement(&self.cfg).version
     }
 
     /// Every `Heartbeat` the agent sent, in order.
@@ -456,6 +611,21 @@ impl MockControl {
             expected_client_cert: Arc::new(material.client_cert_der.clone()),
             cfg: Arc::new(cfg.clone()),
         };
+        // A human starting `control-mock` by hand gets something to pull: the
+        // startup document is what makes the two-command walkthrough in the
+        // README end with an ack line.
+        if let Some(hex) = &cfg.initial_document_hex {
+            let version = cfg
+                .initial_version
+                .unwrap_or_else(|| cfg.desired_version.max(1));
+            shared
+                .publish_hex(version, hex)
+                .map_err(|error| anyhow::anyhow!("publish the startup document: {error}"))?;
+        }
+        if let Some(addr) = cfg.admin_listen {
+            let admin = admin::spawn(shared.clone(), addr)?;
+            log::info!("mock admin listening on http://{}", admin.addr);
+        }
         let router = build_router(&cfg, &material, shared)?;
         let incoming = TcpIncoming::bind(addr)?;
         log::info!(
@@ -664,8 +834,10 @@ impl pb::agent_control_server::AgentControl for MockService {
                     ),
                 ));
             }
+            let received_at = unix_ms();
             state.acks.push(request);
-            (announced, unix_ms())
+            state.ack_received_at.push(received_at);
+            (announced, received_at)
         };
         Ok(Response::new(pb::AckConfigResponse {
             recorded: true,
@@ -682,6 +854,11 @@ impl pb::agent_control_server::AgentControl for MockService {
         self.pre_call(Rpc::ReportWindows, &request).await?;
         let request = request.into_inner();
         let submitted = request.windows.len() as u32;
+        let window_ids: Vec<u64> = request
+            .windows
+            .iter()
+            .map(|window| window.window_id)
+            .collect();
         let mut accepted = 0_u32;
         let mut duplicates = 0_u32;
         let mut rejected = 0_u32;
@@ -734,6 +911,7 @@ impl pb::agent_control_server::AgentControl for MockService {
                 }
             }
             state.reports.push(request);
+            state.report_received_at.push((unix_ms(), window_ids));
         }
 
         debug_assert_eq!(
@@ -1126,6 +1304,39 @@ fn unix_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// Milliseconds of a protobuf timestamp, clamping a malformed one to 0.
+fn unix_ms_of(timestamp: &prost_types::Timestamp) -> u64 {
+    let seconds = timestamp.seconds.max(0) as u64;
+    let millis = timestamp.nanos.clamp(0, 999_999_999) as u64 / 1_000_000;
+    seconds.saturating_mul(1_000).saturating_add(millis)
+}
+
+/// Lowercase hex, for exposing byte fields over the admin JSON.
+pub(super) fn to_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+/// Lowercase or uppercase hex to bytes, rejecting odd lengths and non-digits.
+fn decode_hex(hex: &str) -> Result<Vec<u8>, String> {
+    let hex = hex.trim();
+    if !hex.len().is_multiple_of(2) {
+        return Err(format!("hex string has an odd length ({})", hex.len()));
+    }
+    hex.as_bytes()
+        .chunks(2)
+        .map(|pair| {
+            let text = std::str::from_utf8(pair).map_err(|_| "hex is not ASCII".to_owned())?;
+            u8::from_str_radix(text, 16).map_err(|_| format!("{text:?} is not a hex byte"))
+        })
+        .collect()
 }
 
 fn timestamp_from_unix_ms(unix_ms: u64) -> prost_types::Timestamp {

@@ -789,6 +789,11 @@ impl<C: ControlClient, A: ConfigApply + DataPlane> AgentLoop<C, A> {
                             // §5.7: the notification carries no body; it only
                             // tells us something newer exists.
                             self.desired_version = self.desired_version.max(notification.version);
+                            // The hash we know comes from an older announcement.
+                            // Keeping it would let `sync_config`'s "same content,
+                            // new version" shortcut acknowledge this version
+                            // without downloading it — with a stale hash.
+                            self.desired_sha256.clear();
                         }
                         Wait::Notification(Some(Err(error))) => {
                             log::warn!("watch: stream failed: {error}");
