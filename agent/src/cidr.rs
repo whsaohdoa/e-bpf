@@ -6,9 +6,7 @@
 //! zero). Parsing is deliberately syntactic: host bits are *not* masked here —
 //! the caller decides what a prefix means — and `"10.0.1.7/24"` is accepted.
 
-use std::error::Error;
-use std::fmt;
-use std::net::IpAddr;
+use std::{error::Error, fmt, net::IpAddr};
 
 /// A parsed address plus its prefix length.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

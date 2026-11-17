@@ -5,8 +5,7 @@
 //! character by character on the other side. `as_str` and `from_wire` are kept
 //! adjacent, and a round-trip test covers every variant in both directions.
 
-use std::error::Error;
-use std::fmt;
+use std::{error::Error, fmt};
 
 /// Codes the agent reports in `AckConfigRequest.error_code` (contract §12.3).
 ///

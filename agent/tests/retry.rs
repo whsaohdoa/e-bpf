@@ -2,16 +2,16 @@
 //! contract's table, `x-retry-after-ms` wins over the local schedule, and a
 //! fatal status stops the agent without further requests.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
-use agent::agent_loop::{AgentConfig, AgentError, AgentLoop};
-use agent::client::Rpc;
-use agent::client::tonic::TonicClient;
-use agent::clock::{ClockOffset, ManualSleeper, Sleeper};
-use agent::error::ServerErrorCode;
-use agent::mock::{MockConfig, MockControl, RecordingApply, config_document, wait_for};
-use agent::report::ReportSink;
+use agent::{
+    agent_loop::{AgentConfig, AgentError, AgentLoop},
+    client::{Rpc, tonic::TonicClient},
+    clock::{ClockOffset, ManualSleeper, Sleeper},
+    error::ServerErrorCode,
+    mock::{MockConfig, MockControl, RecordingApply, config_document, wait_for},
+    report::ReportSink,
+};
 
 const WINDOW_NS: u64 = 1_000_000_000;
 

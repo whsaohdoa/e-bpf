@@ -4,16 +4,16 @@
 
 use std::time::Duration;
 
-use agent::agent_loop::{AgentConfig, AgentLoop};
-use agent::client::Rpc;
-use agent::client::tonic::TonicClient;
-use agent::clock::ClockOffset;
-use agent::error::AckErrorCode;
-use agent::mock::{MockConfig, MockControl, RecordingApply, config_document, wait_for};
-use agent::pb;
-use agent::report::ReportSink;
-use probe::aggregate::AggRecord;
-use probe::sink::AggSink;
+use agent::{
+    agent_loop::{AgentConfig, AgentLoop},
+    client::{Rpc, tonic::TonicClient},
+    clock::ClockOffset,
+    error::AckErrorCode,
+    mock::{MockConfig, MockControl, RecordingApply, config_document, wait_for},
+    pb,
+    report::ReportSink,
+};
+use probe::{aggregate::AggRecord, sink::AggSink};
 use probe_common::AggKey;
 
 const WINDOW_NS: u64 = 1_000_000_000;

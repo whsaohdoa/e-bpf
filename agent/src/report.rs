@@ -220,8 +220,9 @@ pub const SHUTDOWN_REPORT_DEADLINE: Duration = Duration::from_secs(2);
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use probe_common::AggKey;
+
+    use super::*;
 
     fn key(seed: u8) -> AggKey {
         let mut key = AggKey::default();

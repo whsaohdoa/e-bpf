@@ -68,9 +68,10 @@ pub fn key_hash_hex(k: &AggKey) -> String {
 
 #[cfg(test)]
 mod tests {
+    use probe_common::{ACTION_BLOCK, ACTION_PASS, DIRECTION_INGRESS, FAMILY_IPV4, FAMILY_IPV6};
+
     use super::*;
     use crate::test_util::{bytes_to_hex, hex_to_bytes};
-    use probe_common::{ACTION_BLOCK, ACTION_PASS, DIRECTION_INGRESS, FAMILY_IPV4, FAMILY_IPV6};
 
     // Contract §7.3 vectors. Do not edit a single hex digit.
     const INPUT_A: &str = "70726f62652e6167672e76310001040000000000000a0001000000000000000000000000000a0002050000000000000000000000001f9006";

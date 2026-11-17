@@ -4,13 +4,14 @@
 
 use std::time::Duration;
 
-use agent::agent_loop::{AgentConfig, AgentLoop};
-use agent::client::tonic::TonicClient;
-use agent::client::{ControlClient, Rpc};
-use agent::clock::ClockOffset;
-use agent::mock::{MockConfig, MockControl, RecordingApply, config_document, wait_for};
-use agent::pb;
-use agent::report::ReportSink;
+use agent::{
+    agent_loop::{AgentConfig, AgentLoop},
+    client::{ControlClient, Rpc, tonic::TonicClient},
+    clock::ClockOffset,
+    mock::{MockConfig, MockControl, RecordingApply, config_document, wait_for},
+    pb,
+    report::ReportSink,
+};
 
 const WINDOW_NS: u64 = 1_000_000_000;
 

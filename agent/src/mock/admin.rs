@@ -18,9 +18,11 @@
 //! binds whatever the caller asked for, and the contract's real control plane
 //! has no such surface at all.
 
-use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::time::Duration;
+use std::{
+    io::{Read, Write},
+    net::{SocketAddr, TcpListener, TcpStream},
+    time::Duration,
+};
 
 use serde_json::{Value, json};
 

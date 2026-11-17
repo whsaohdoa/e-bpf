@@ -2,11 +2,12 @@
 //! issued to somebody else must both end the run as fatal `agent.*` codes, not
 //! as retryable transport errors.
 
-use agent::client::tonic::TonicClient;
-use agent::client::{ClientError, ControlClient};
-use agent::error::ServerErrorCode;
-use agent::mock::{MockConfig, MockControl};
-use agent::pb;
+use agent::{
+    client::{ClientError, ControlClient, tonic::TonicClient},
+    error::ServerErrorCode,
+    mock::{MockConfig, MockControl},
+    pb,
+};
 
 fn config() -> MockConfig {
     MockConfig {

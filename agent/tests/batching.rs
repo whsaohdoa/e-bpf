@@ -5,13 +5,14 @@
 
 use std::time::Duration;
 
-use agent::agent_loop::{AgentConfig, AgentError, AgentLoop};
-use agent::client::tonic::TonicClient;
-use agent::clock::ClockOffset;
-use agent::mock::{MockConfig, MockControl, RecordingApply, wait_for, window_report};
-use agent::report::{MAX_WINDOWS_PER_BATCH, ReportSink};
-use probe::aggregate::AggRecord;
-use probe::sink::AggSink;
+use agent::{
+    agent_loop::{AgentConfig, AgentError, AgentLoop},
+    client::tonic::TonicClient,
+    clock::ClockOffset,
+    mock::{MockConfig, MockControl, RecordingApply, wait_for, window_report},
+    report::{MAX_WINDOWS_PER_BATCH, ReportSink},
+};
+use probe::{aggregate::AggRecord, sink::AggSink};
 use probe_common::AggKey;
 
 const WINDOW_NS: u64 = 1_000_000_000;

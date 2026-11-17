@@ -12,11 +12,13 @@ use std::{
     time::Duration,
 };
 
-use agent::agent_loop::{AgentConfig, AgentLoop};
-use agent::clock::ClockOffset;
-use agent::mock::{MockConfig, MockControl, RecordingApply, config_document, wait_for};
-use agent::pb;
-use agent::report::ReportSink;
+use agent::{
+    agent_loop::{AgentConfig, AgentLoop},
+    clock::ClockOffset,
+    mock::{MockConfig, MockControl, RecordingApply, config_document, wait_for},
+    pb,
+    report::ReportSink,
+};
 
 /// The binary under test, built by cargo for this integration test.
 const BIN: &str = env!("CARGO_BIN_EXE_probe-agent");

@@ -23,8 +23,7 @@
 //! `verification/run_control_demo.sh` drives. It is loopback-only scaffolding:
 //! never expose it.
 
-use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::{net::SocketAddr, path::PathBuf};
 
 use agent::mock::{MockConfig, MockControl};
 

@@ -11,18 +11,13 @@
 //! back, and the data path keeps running its current behaviour (fail-open, see
 //! contract §10 L1).
 
-use std::collections::HashSet;
-use std::error::Error;
-use std::fmt;
+use std::{collections::HashSet, error::Error, fmt};
 
+use probe_common::{CONFIG_VERSION, ProbeConfig};
 use prost::Message;
 use sha2::{Digest, Sha256};
 
-use probe_common::{CONFIG_VERSION, ProbeConfig};
-
-use crate::cidr::parse_cidr;
-use crate::error::AckErrorCode;
-use crate::pb;
+use crate::{cidr::parse_cidr, error::AckErrorCode, pb};
 
 /// `AckConfigRequest.error_detail` is limited to 512 characters.
 const DETAIL_MAX_CHARS: usize = 512;
@@ -344,9 +339,10 @@ fn hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use probe_common::FAMILY_IPV6;
+
     use super::*;
     use crate::test_util::{bytes_to_hex, hex_to_bytes};
-    use probe_common::FAMILY_IPV6;
 
     // Contract §6.4 vectors. Do not edit a single hex digit.
     const DOC_A: &str = "080110904e18d00f20182840";

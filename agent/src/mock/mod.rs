@@ -19,19 +19,21 @@
 //! Nothing here is part of the shipped agent, and no state it keeps survives a
 //! process restart.
 
-use std::collections::{HashSet, VecDeque};
-use std::net::{Ipv4Addr, SocketAddr};
-use std::path::{Path, PathBuf};
-use std::pin::Pin;
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::task::{Context, Poll};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{
+    collections::{HashSet, VecDeque},
+    net::{Ipv4Addr, SocketAddr},
+    path::{Path, PathBuf},
+    pin::Pin,
+    sync::{Arc, Mutex, MutexGuard},
+    task::{Context, Poll},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
-use ::tonic::codegen::BoxStream;
-use ::tonic::codegen::tokio_stream::Stream;
-use ::tonic::transport::server::TcpIncoming;
-use ::tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
-use ::tonic::{Code, Request, Response, Status};
+use ::tonic::{
+    Code, Request, Response, Status,
+    codegen::{BoxStream, tokio_stream::Stream},
+    transport::{Certificate, Identity, Server, ServerTlsConfig, server::TcpIncoming},
+};
 use async_trait::async_trait;
 use prost::Message as _;
 use rcgen::{
@@ -40,11 +42,15 @@ use rcgen::{
 };
 use sha2::{Digest, Sha256};
 
-use crate::agent_loop::{ApplyFailure, ConfigApply};
-use crate::client::Rpc;
-use crate::client::tonic::{ClientConfig, ERROR_CODE_HEADER};
-use crate::error::ServerErrorCode;
-use crate::pb;
+use crate::{
+    agent_loop::{ApplyFailure, ConfigApply},
+    client::{
+        Rpc,
+        tonic::{ClientConfig, ERROR_CODE_HEADER},
+    },
+    error::ServerErrorCode,
+    pb,
+};
 
 mod admin;
 
