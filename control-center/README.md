@@ -4,7 +4,7 @@
 一套 compose 就能起，一套 k3d 清单就能上集群。目标不是把 S1–S3 的功能写完，而是先把
 **镜像边界、数据库边界、网络边界**三件事定死——后面的功能都长在这三条边界上。
 
-> 下文引用的 `Train0-Plan-6x1.md` 不在本仓库内，指工作区外层的 `docs/Train0-Plan-6x1.md`。
+> 下文引用的 `Train0-Plan-6x1.md` 指仓库内 `docs/Train0-Plan-6x1.md`。
 
 本目录属于 `probe` 仓库，但是一个独立可运行的子项目：只改 `control-center/` 时不需要跑
 Rust 的分层测试，反之亦然。两者的接线状态见 `probe/README.md` 顶部两个项目的导航表。
@@ -110,6 +110,8 @@ bash scripts/k3d-down.sh
 
 ## 6. 已经有的 vs 还没有的
 
+本节按“已有/还没有”陈述边界；逐项当前状态的唯一权威是 `docs/STATUS.md`。
+
 已有：两个角色共用一个 jar（`CC_ROLE=mgmt|control`）、健康/就绪探针、SPA 只读视图、
 种子数据（admin/aud/alice/bob/carol、g1/g2、m1/m2）、审计只追加、outbox 表结构、
 两库物理隔离、compose + k3d 两套部署、全程 UTC、`control.agent.v1.AgentControl` gRPC
@@ -123,13 +125,12 @@ bash scripts/k3d-down.sh
   `POST /internal/v1/config-versions`（只在 `cc.role=control` 注册，靠 netpol 与 loopback 限制，
   是计划 §12-D3 的备选分支）；`/agent/v1/*` 这个
   REST 形态不会再做，agent 通道已改为 gRPC（见下一行）
-- gRPC `control.agent.v1.AgentControl` 的六个方法已实现（Register / Heartbeat / GetConfig /
-  AckConfig / ReportWindows / GetCursor；契约见工作区 `docs/Control-Agent-API-v1.md`，proto 在
-  `probe/agent/proto/control.proto`），**Watch 仍返回 `UNIMPLEMENTED`**；9090 上要求 TLS
-  `clientAuth=REQUIRE`（单一 CA，无吊销列表）。配套 schema 已就位
-  （`control-006…010`：agent 侧列、`config_version.document` 改 `bytea`、report/report_window/
-  report_sample/config_ack），结构断言在 `scripts/db-verify.sql`
-- mTLS 设备证书签发与 CN 绑定（S2）
+- gRPC `control.agent.v1.AgentControl`：六个方法已实现（Register / Heartbeat / GetConfig /
+  AckConfig / ReportWindows / GetCursor；契约见 `docs/Control-Agent-API-v1.md`，proto 在
+  `probe/agent/proto/control.proto`），**还缺 `Watch`**（仍返回 `UNIMPLEMENTED`）；9090 已要求
+  TLS `clientAuth=REQUIRE`（单一 CA，无吊销列表），**还缺**设备证书签发与 CN 绑定（S2）。
+  配套 schema 已就位（`control-006…010`：agent 侧列、`config_version.document` 改 `bytea`、
+  report/report_window/report_sample/config_ack），结构断言在 `scripts/db-verify.sql`
 - 6 个负向验收用例（`Train0-Plan-6x1.md:36`）目前只有 `/api/machines` 一条形状断言
 - 种子里的 `password_hash` 是 `!pending` 占位，S1-2 换 Argon2id，不允许手写 hash
 

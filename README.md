@@ -5,9 +5,9 @@
 | 部分 | 技术栈 | 入口 | 状态 |
 |---|---|---|---|
 | `probe/` 数据面 | Rust（aya）+ eBPF（`bpfel-unknown-none`） | 本文件 | 可用：窗口聚合 + 两份 CSV，L0–L3 测试 |
-| `control-center/` 控制面 | Spring Boot 3.5 / Java 21 + Postgres 17 + Vite/React + compose/k3d | [`control-center/README.md`](control-center/README.md) | 骨架：镜像、数据库、网络边界已定，业务接口未实现 |
+| `control-center/` 控制面 | Spring Boot 4.1.2 / Java 21 + Postgres 17 + Vite/React + compose/k3d | [`control-center/README.md`](control-center/README.md) | `control.agent.v1.AgentControl` gRPC 服务端已实现六个方法（`Watch` 仍 `UNIMPLEMENTED`），管理面 API 尚未实现 |
 
-两者**尚未接线**：Rust 侧已经有会说 gRPC 的 agent（`probe-agent`，见「控制面通信（Train 0）」），但 `control-center/` 里还没有 gRPC 服务端，agent 现在只连得上进程内假控制面 `control-mock`；CSV 仍然只由 `probe` 二进制写。
+两者**尚未接线**：Rust 侧已经有会说 gRPC 的 agent（`probe-agent`，见「控制面通信（Train 0）」），`control-center/` 里也已有 gRPC 服务端（六个方法，`Watch` 未实现），但两端还没有端到端打通（E8），agent 现在只连得上进程内假控制面 `control-mock`；CSV 仍然只由 `probe` 二进制写。逐项当前状态的唯一权威是 [`docs/STATUS.md`](docs/STATUS.md)。
 改代码看 `CONTRIBUTING.md`（构建、测试分层、门禁、真机验证），硬性约定与禁区看 `AGENTS.md`。
 
 本文其余部分只讲 `probe/`。
@@ -420,7 +420,7 @@ ip netns del aya-ns
 **边界一句话**：agent 通过 gRPC + mTLS 连控制面，拿到的是一串**原始字节**外加版本号与
 sha256，自己校验、应用、回 ack。Train 0 交付 Rust 侧的全部能力（`agent/` crate 与
 `probe-agent` 二进制）加一个**进程内假控制面** `control-mock`；Spring 侧的真控制面在下一个
-分支，契约见工作区 `docs/Control-Agent-API-v1.md`，proto 在 `agent/proto/control.proto`。
+分支，契约见仓库内 `docs/Control-Agent-API-v1.md`，proto 在 `agent/proto/control.proto`。
 
 ### 手工跑一遍
 
@@ -506,8 +506,9 @@ agent 只对**收到的字节**求哈希，**不重新序列化**：字节由控
 | `GetCursor` | 重启时问「上次提交到哪个窗口」 | 实现 |
 | `Watch` | 服务端流：有新版本就推，省掉一次心跳延迟 | agent 实现；真控制面 `UNIMPLEMENTED` |
 
-真控制面（Spring）这七个方法都还没写，agent 调用会拿到 `UNIMPLEMENTED`，这正是 L4，也是
-`control-mock` 存在的理由：它是给人和脚本手工戳 agent 用的，不是生产控制面。
+真控制面（Spring）已实现上表六个方法（`Register`/`Heartbeat`/`GetConfig`/`AckConfig`/`ReportWindows`/`GetCursor`），
+`Watch` 仍返回 `UNIMPLEMENTED`；两端尚未端到端接线（E8），所以 `control-mock` 仍是本地联调与 L4 用例的默认对端
+——它是给人和脚本手工戳 agent 用的，不是生产控制面。
 
 ### 已知限制
 
@@ -539,9 +540,9 @@ ack，并把 `rules` 放进 `degraded_features`，让控制面和 Web 能看见�
 ## 已知限制
 
 - **无规则匹配（E6 未实现）**：`action` 恒为 `pass`、`rule_id = 0`、`reason = 0`，
-  不读 `default_action`，不做丢弃。E8 只完成了 Rust 侧：`probe-agent` 已经能连控制面
-  拉配置、回 ack（见上节），但 `control-center/` 还没有 gRPC 服务端，`probe` 二进制
-  本身仍然只写本地 CSV、不上报。
+  不读 `default_action`，不做丢弃。E8 两端各自已实现：`probe-agent` 能连控制面拉配置、回 ack
+  （见上节），`control-center/` 也已有 `AgentControl` 六个方法（`Watch` 未实现），但**尚未端到端接线**；
+  `probe` 二进制本身仍然只写本地 CSV、不上报。
 - **IPv6 扩展头不遍历**：`protocol` 取 base header 的 Next Header；遇到
   Hop-by-Hop(0)/Routing(43)/Fragment(44)/DestOpts(60)/AH(51) 时该列可能不是最终 L4
   协议（例如 MLDv2 显示 `0`），此时端口为 0。
