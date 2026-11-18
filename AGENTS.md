@@ -29,7 +29,7 @@ git remote -v                  # origin = https://github.com/whsaohdoa/e-bpf.git
 
 ## 2. 构建环境
 
-- Windows 宿主**没有** `cargo`/`rustup`，所有 Rust 命令在容器 `aya-dev` 里跑（`docker compose exec aya-dev bash -lc 'cd /workspace/probe && …'`）。
+- Windows 宿主**没有** `cargo`/`rustup`，所有 Rust 命令在容器 `aya-dev` 里跑：手工时 `docker compose exec aya-dev bash -lc 'cd /workspace/probe && …'`，agent 一律用 `docker_exec` 工具（见 §9）。
 - 宿主**有** `java`(17) / `mvn` / `node` / `npm` / `kubectl` / `k3d`，**没有** `make`。
 - 路径映射：宿主工作区 ↔ 容器 `/workspace`，仓库在容器里是 `/workspace/probe`。
 
@@ -104,3 +104,9 @@ cargo xtask soak --minutes N             # 占位，未实现
 - 同一文件的多处改动合并成一次 `edit`（或一次脚本批量替换）；互相独立的 `read`/`grep`/`docker` 调用放同一条消息并行发出。
 - 串读 10+ 文件或单文件 >300 行的提炼交 `subagent`；长结论落盘（`docs/`、`.tmp/`），后续从文件定点取用。
 - 上下文到 ~60K 就 `compress`，摘要只留可执行事实；不要中断在途请求后立刻重发。
+
+## 9. 工具通道（dsh / agent 环境）
+
+- **远程仓库操作先加载 `gh` skill**：`git push`、开/改/合并 PR、评审与评论、issue、tag、release、分支保护、查 Actions，都先调用 `gh` skill 再执行，按其 `--json` / `gh api` 写法拿结构化输出；不要手拼 `curl` 调 API，也不要裸 `git push --force`。目的：省 token、鉴权与限流失败一次诊清。
+- **docker 操作一律用 `docker_*` 工具**：`docker_exec` / `docker_ps` / `docker_logs` / `docker_start` / `docker_build` / `docker_snapshot` 等，不要手拼 `docker` / `docker compose` shell 命令。宿主 pwsh 不可用时，这是唯一可用的命令行通道。
+- 进 `aya-dev` 跑 Rust：`docker_exec(container="aya-dev", command="cd /workspace/probe && cargo xtask …")`；路径映射见 §2。

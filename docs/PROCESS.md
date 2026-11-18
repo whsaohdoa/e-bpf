@@ -168,3 +168,4 @@
 
 - 协同/流程类冲突以本文件为准，并在 `docs/adr/` 记一条 ADR 说明改了什么、为什么。
 - 命令与门禁细节只认 `CONTRIBUTING.md`（CI 按它实现，见 `.github/workflows/ci.yml`），本文不复制。
+- 工具通道：push / 开 PR / 评审 / tag / issue 等**远程仓库操作先加载 `gh` skill**，docker 操作一律用 `docker_*` 工具；写法见 `AGENTS.md` §9，本文不写具体命令。

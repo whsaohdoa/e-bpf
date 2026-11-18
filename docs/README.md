@@ -16,7 +16,7 @@
 | `docs/Train0-Plan-6x1.md` | 六周计划、G1–G5、验收剧本、DoD | 计划与验收口径 | PO 批准的范围/日期变更 | 不写状态、不回填复选框、不贴提交号 |
 | `docs/Control-Agent-API-v1.md` | agent ↔ 控制面线协议、配置文档、错误码 | 契约的唯一来源 | proto 字段/语义变更 | 不与 `agent/proto/control.proto` 双向漂移 |
 | `CONTRIBUTING.md` | 构建、容器、测试分层、门禁、e2e | 命令的唯一来源 | 命令、门禁、环境变更 | 不写架构与状态 |
-| `AGENTS.md` | 硬性约束、禁区、文档索引 | agent/新人的入口与红线 | 约束变化 | 不复制命令细节、不写 git 事实 |
+| `AGENTS.md` | 硬性约束、禁区、工具通道（`gh` skill / `docker_*`）、文档索引 | agent/新人的入口与红线 | 约束变化 | 不复制命令细节、不写 git 事实 |
 | `README.md` | 外部用法、架构、ABI/map/CSV、产品级限制 | 产品面的唯一来源 | 行为、ABI、CSV 变更 | 不写内部计划与进度 |
 | `control-center/README.md` | 控制面边界、部署、数据库、已有/还没有 | 控制面现状的权威（“不假装完成”） | 控制面行为变化 | 不写 Rust 侧状态、不写计划排期 |
 | `control-center/docs/plan-control-plane-impl.md` | M0–M4 切片、T0.1–T4.2、勘误 | 控制面实施计划与验收门 | 任务口径、门禁命令变更 | 不加状态列、不写当前里程碑 |
