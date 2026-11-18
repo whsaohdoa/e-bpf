@@ -25,6 +25,7 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.grpc.test.autoconfigure.LocalGrpcServerPort;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -39,12 +40,14 @@ import org.springframework.jdbc.core.JdbcTemplate;
  * the TLS handshake; only the trusted channel may reach {@code GetCursor}.
  *
  * <p>Requires the helper-provided {@code CC_TLS_DIR} fixture directory and a reachable PostgreSQL
- * (the app context boots the full control role). Skipped when the fixtures are absent so that a
- * plain {@code mvn test} on a developer machine does not fail for the wrong reason.
+ * (the app context boots the full control role). Gated on {@code CC_IT_PG=1} at class level so CI
+ * (no PostgreSQL) skips it instead of trying to load the context with an unresolved
+ * {@code CC_DB_URL}; the fixture check below only runs once that gate is satisfied.
  */
 @SpringBootTest(
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
         properties = {"spring.grpc.server.port=0"})
+@EnabledIfEnvironmentVariable(named = "CC_IT_PG", matches = "1")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class MutualTlsTest {
 
