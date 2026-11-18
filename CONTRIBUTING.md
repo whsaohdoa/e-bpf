@@ -7,7 +7,7 @@
 
 | 事实 | 说明 |
 |---|---|
-| git 根 = 本目录 | 工作区外层（`D:\repos\rust\eBPF`）不是仓库；`verification/`、`docs/`、`out/` 在仓库外 |
+| git 根 = 本目录 | 工作区外层（`D:\repos\rust\eBPF`）不是仓库；文档与 `verification/` 产物都在仓库内，外层只剩 `out/`、`.tmp/` |
 | 宿主没有 Rust 工具链 | Windows 宿主没有 `cargo`/`rustup`，所有 Rust 命令都在容器里跑 |
 | 开发容器 | `docker compose` 服务名 `aya-dev`，特权 + host 网络 + memlock 无限制，工作目录 `/workspace` |
 | 路径映射 | 宿主工作区 ↔ 容器 `/workspace`，因此仓库在容器里是 `/workspace/probe` |
@@ -17,8 +17,9 @@ docker compose exec aya-dev bash -lc 'cd /workspace/probe && <cmd>'
 ```
 
 `docker-compose.yml` 的默认挂载是 `probe/` 自身；当前开发容器把**外层目录**挂到 `/workspace`
-（所以 `/workspace/probe` 就是仓库）。若按默认值启动，真机脚本依赖的 `/workspace/probe`、
-`/workspace/verification` 不存在，需要用 `AYA_DEV_WORKSPACE_HOST` 指到外层。
+（所以 `/workspace/probe` 就是仓库）。若按默认值只挂 `probe/`，真机脚本依赖的 `/workspace/probe`
+不存在，需要用 `AYA_DEV_WORKSPACE_HOST` 指到外层；脚本与产物都在仓库 `probe/verification/` 内，
+外层 `verification/` 已于 2026-11-18 删除，不再需要。
 
 ## 2. 构建与运行
 
@@ -146,7 +147,7 @@ probe/tests/csv_schema.rs # L1：CLI/CSV 列序契约
 probe/tests/pipeline.rs   # L2：进程内管线用例
 probe/tests/e2e.rs        # L3：特权真机用例（L0–L2 不跑）
 probe/src/driver.rs       # 可驱动门面：attach/替换配置，`probe` 与 `probe-agent` 共用
-agent/proto/control.proto # 控制面 gRPC 契约（proto 是唯一 schema；说明文档在工作区 docs/）
+agent/proto/control.proto # 控制面 gRPC 契约（proto 是唯一 schema；说明文档在 docs/Control-Agent-API-v1.md）
 agent/src/agent_loop.rs   # 状态机：Register→GetCursor→GetConfig→校验→apply→Ack→心跳/上报/Watch
 agent/src/client/         # `ControlClient`：mTLS 通道与七个 RPC 的类型化封装
 agent/src/mock/           # 进程内假控制面：TLS 服务端、rcgen 证书、HTTP admin（dev-only）
@@ -198,4 +199,23 @@ bash control-center/Makefile             # make up/smoke/p95/audit-check/migrate
 | S4 真机 e2e 证据 | `verification/REPORT-e2e.md` |
 | 聚合验收证据（A2–A7） | `verification/REPORT-aggregation.md` |
 | 控制中心边界、部署、迁移 | `control-center/README.md` |
+| 跨切片状态与今日优先级（每日必看） | `docs/STATUS.md` |
+| 协作流程（分支/PR/评审/发布） | `docs/PROCESS.md` |
+| 待办与优先级 | `docs/backlog.md` |
+| 架构决策记录 | `docs/adr/` |
+| 一次性/运维操作手册 | `docs/runbooks/` |
+| Train 0 计划 | `docs/Train0-Plan-6x1.md` |
 | CI 与工具链 | `.github/workflows/ci.yml`、`control-center.yml`、`image.yml`、`scripts/ci/*.sh` |
+
+文档只保留单一来源，不要在工作区外层或其它目录复制一份。
+
+## 8. 分支、PR、评审与发布
+
+- 分支：功能分支从 `main` 拉出，命名 `feat/<topic>`、`fix/<topic>`、`docs/<topic>`；合并后立即删除远端分支，`main` 是唯一长期分支。
+- PR：小步提交，单个 PR ≤400 行（含测试；生成物与 lockfile 除外）；标题用 Conventional Commits。
+- 评审：≥1 人 review；不强制 approve（单人维护时 approve 会阻塞合并），review 意见必须处理或明确回复。
+- 门禁：`gate` 必须绿；它恒执行，skipped 视为通过。`fast`/`bpf` 由 paths-filter 决定是否跑，不作为合并条件。
+- 合并：squash merge，保持 `main` 线性；合并提交信息沿用 PR 标题。
+- 发布：demo 打 tag `v0.<周>-w<N>`（周为两位，N 为该周第 N 次），tag 从 `main` 打。
+- 状态：合并即更新 `docs/STATUS.md`（状态、下一步、阻塞项），并在 PR 描述里写验证命令与结果。
+- 详细流程与例外以 `docs/PROCESS.md` 为准；CI 分工见本文件 `128-132` 与 `.github/workflows/ci.yml`。

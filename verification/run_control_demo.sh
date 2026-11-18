@@ -36,7 +36,7 @@
 #   bash verification/run_control_demo.sh
 #
 # Knobs:
-#   CONTROL_DEMO_OUT=DIR   where the CSV and logs go (default: ../verification/control)
+#   CONTROL_DEMO_OUT=DIR   where the CSV and logs go (default: <repo>/verification/control)
 #   CONTROL_DEMO_KEEP=1    keep the temporary directory (certs, mock configs)
 #
 # Exit code: 0 only when all ten publishes were acknowledged as APPLIED.
@@ -44,7 +44,7 @@
 set -uo pipefail
 
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-OUT=${CONTROL_DEMO_OUT:-$(cd "$REPO/.." && pwd)/verification/control}
+OUT=${CONTROL_DEMO_OUT:-$REPO/verification/control}
 BIN=$REPO/target/debug
 CSV=""
 

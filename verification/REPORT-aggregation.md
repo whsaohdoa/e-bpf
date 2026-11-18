@@ -285,6 +285,7 @@ CSV 契约：
 - 性能证据：`verification/perf/`（`perf-summary.tsv`、`perf-{old,new,a5}-summary.txt`、
   `perf-a5-agg.csv`、`RESULTS-A9.md`）。
 - 内存证据：运行期 `bpftool map show`（§4.3）。
+- 归档（2026-11-18 外层清理）：上述 `verification/*.csv|*.log` 仅存于备份 `.tmp/backup-20261118/verification/`；`perf/` 下的 summary/tsv/`RESULTS-A9.md` 已复制到仓库 `verification/perf/`（`perf/`、`control/`、`drawio-probe/` 均在 `verification/.gitignore` 内，不进 git）。
 
 ## 7. 性能对比
 

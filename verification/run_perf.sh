@@ -64,8 +64,8 @@ KEEP_NET=${KEEP_NET:-0}
 PROBE_OLD=${PROBE_OLD:-/tmp/probe-old}
 PROBE_NEW=${PROBE_NEW:-/workspace/probe/target/release/probe}
 GEN=${GEN:-/tmp/traffic_gen}
-GEN_SRC=${GEN_SRC:-/workspace/verification/traffic_gen.rs}
-PERF_DIR=${PERF_DIR:-/workspace/verification/perf}
+GEN_SRC=${GEN_SRC:-/workspace/probe/verification/traffic_gen.rs}
+PERF_DIR=${PERF_DIR:-/workspace/probe/verification/perf}
 
 NS=perf-ns
 IFACE=perf0

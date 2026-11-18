@@ -6,7 +6,7 @@
 
 | 路径 | 角色 |
 |---|---|
-| `D:\repos\rust\eBPF` | 工作区外层，**不是** git 仓库；`verification/`（日志/CSV）、`docs/`（Train 0 计划）、`out/`、`.tmp/` 都在这层 |
+| `D:\repos\rust\eBPF` | 外层目录，**不是** git 仓库；只剩 `out/`、`.tmp/`、`diagrams/`、`probe-backup-*.bundle`（`docs/`、`verification/` 已于 2026-11-18 删除，见 `probe/docs/runbooks/outer-workspace-cleanup.md` §9） |
 | `D:\repos\rust\eBPF\probe` | **唯一 git 仓库根**，Cargo workspace 根，也是本文件所在目录 |
 | `probe/` | 用户态 crate（CLI、attach、ringbuf 消费、CSV） |
 | `control-center/` | **独立的 Spring + Postgres + SPA + k3d 子项目**，有自己的 README/Makefile/scripts，见 §6 |
@@ -22,14 +22,14 @@ git remote -v                  # origin = https://github.com/whsaohdoa/e-bpf.git
 
 不变的事实：
 
-- 提交风格：Conventional Commits（`feat:` / `fix:` / `refactor:` / `test:` / `docs:` / `ci:` / `chore:`），正文中英均可。
+- 提交风格：Conventional Commits，type 白名单 9 种（`feat` / `fix` / `refactor` / `test` / `docs` / `ci` / `chore` / `build` / `perf`），正文中英均可；细则见 `docs/PROCESS.md` §3。
 - 备份 `probe-backup-*.bundle`（git bundle，在工作区外层）**不要删**。
 - 功能分支合并后即删；远端只保留长期分支。
 - 本机 git 到 `github.com:443` 曾不通（schannel `SEC_E_NO_CREDENTIALS`），只有 `gh api` 可走；推不动时先确认是网络还是凭据，别反复强推。
 
 ## 2. 构建环境
 
-- Windows 宿主**没有** `cargo`/`rustup`，所有 Rust 命令在容器 `aya-dev` 里跑（`docker compose exec aya-dev bash -lc 'cd /workspace/probe && …'`）。
+- Windows 宿主**没有** `cargo`/`rustup`，所有 Rust 命令在容器 `aya-dev` 里跑：手工时 `docker compose exec aya-dev bash -lc 'cd /workspace/probe && …'`，agent 一律用 `docker_exec` 工具（见 §9）。
 - 宿主**有** `java`(17) / `mvn` / `node` / `npm` / `kubectl` / `k3d`，**没有** `make`。
 - 路径映射：宿主工作区 ↔ 容器 `/workspace`，仓库在容器里是 `/workspace/probe`。
 
@@ -62,7 +62,7 @@ cargo xtask soak --minutes N             # 占位，未实现
 
 - 不要在 Windows 宿主直接 `cargo build/test`（无工具链，且 BPF 构建需要 Linux）。
 - 不要跑 `sudo cargo test`：特权只属于 e2e/attach。
-- 不要把 `.env`、`target/`、CSV/日志、`out/`、工作区外层 `verification/` 的产物提交进仓库。
+- 不要把 `.env`、`target/`、CSV/日志、`out/`、`verification/` 下的运行产物提交进仓库（`probe/verification/.gitignore` 已忽略）。
 - 不要绕过 `cargo xtask` 手拼测试命令（分层与 JUnit 输出都依赖它）。
 - 不要在 `probe-ebpf` 里用 `std`、动态分配或浮点。
 - 不要删除 `probe-backup-*.bundle`、`.git`、`verification/run_perf.sh`。
@@ -86,9 +86,14 @@ cargo xtask soak --minutes N             # 占位，未实现
 | 测试分层设计与用例编号 | `verification/TEST-PLAN.md` |
 | S1–S3 分层测试、S4 e2e、聚合验收证据 | `verification/REPORT-layered-tests.md`、`REPORT-e2e.md`、`REPORT-aggregation.md` |
 | 控制中心边界、部署、迁移 | `control-center/README.md` |
-| Train 0 计划（仓库外） | 工作区 `docs/Train0-Plan-6x1.md` |
+| 跨切片状态与今日优先级（每日必看） | `docs/STATUS.md` |
+| 协作流程（分支/PR/评审/发布） | `docs/PROCESS.md` |
+| 待办与优先级 | `docs/backlog.md` |
+| 架构决策记录 | `docs/adr/` |
+| 一次性/运维操作手册 | `docs/runbooks/` |
+| Train 0 计划 | `docs/Train0-Plan-6x1.md` |
 
-工作区外层的 `AGENTS.md` 只是指向本文件的指针；内容以本文件为准。
+工作区外层的 `AGENTS.md` 只是指向本文件的指针；内容以本文件为准。文档只保留单一来源，不要在工作区外层或其它目录复制一份。
 
 ## 8. 省 token（硬约束）
 
@@ -99,3 +104,9 @@ cargo xtask soak --minutes N             # 占位，未实现
 - 同一文件的多处改动合并成一次 `edit`（或一次脚本批量替换）；互相独立的 `read`/`grep`/`docker` 调用放同一条消息并行发出。
 - 串读 10+ 文件或单文件 >300 行的提炼交 `subagent`；长结论落盘（`docs/`、`.tmp/`），后续从文件定点取用。
 - 上下文到 ~60K 就 `compress`，摘要只留可执行事实；不要中断在途请求后立刻重发。
+
+## 9. 工具通道（dsh / agent 环境）
+
+- **远程仓库操作先加载 `gh` skill**：`git push`、开/改/合并 PR、评审与评论、issue、tag、release、分支保护、查 Actions，都先调用 `gh` skill 再执行，按其 `--json` / `gh api` 写法拿结构化输出；不要手拼 `curl` 调 API，也不要裸 `git push --force`。目的：省 token、鉴权与限流失败一次诊清。
+- **docker 操作一律用 `docker_*` 工具**：`docker_exec` / `docker_ps` / `docker_logs` / `docker_start` / `docker_build` / `docker_snapshot` 等，不要手拼 `docker` / `docker compose` shell 命令。宿主 pwsh 不可用时，这是唯一可用的命令行通道。
+- 进 `aya-dev` 跑 Rust：`docker_exec(container="aya-dev", command="cd /workspace/probe && cargo xtask …")`；路径映射见 §2。

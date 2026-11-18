@@ -60,7 +60,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 项目要 JDK 21（宿主上常见的 17 跑不动 Spring Boot 3.5 的编译配置）。
+      # 项目要 JDK 21（宿主上常见的 17 跑不动 Spring Boot 4.1.2 的编译配置）。
       - name: 安装 JDK 21
         uses: actions/setup-java@v4
         with:

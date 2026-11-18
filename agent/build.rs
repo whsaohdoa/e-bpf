@@ -1,8 +1,8 @@
 //! Compiles `proto/control.proto` into Rust types plus the gRPC stubs.
 //!
 //! The contract (`docs/Control-Agent-API-v1.md`, §4) owns the proto text; this
-//! crate ships a byte-identical copy so a checkout without the contract can
-//! still build.
+//! crate ships a byte-identical copy so building the proto does not depend on
+//! parsing the prose contract.
 //!
 //! `prost-build` shells out to `protoc`. Instead of relying on whatever the
 //! host installed — on Ubuntu `protobuf-compiler` does not ship the well-known

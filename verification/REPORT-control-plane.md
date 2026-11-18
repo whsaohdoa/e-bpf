@@ -35,8 +35,8 @@ probe-agent (root, XDP on lo)  ──gRPC + mTLS──▶  control-mock (127.0.0
 - 证书：全部由 `control-mock` 用 `rcgen` 在启动时自签并写到 `--certs <dir>`，脚本不手搓 openssl。
   文件名是 `ca.pem` / `client-cert.pem` / `client-key.pem` / `server-cert.pem` / `server-key.pem`；
   agent 用前三个，`require_client_cert` 保持默认 `true`。
-- 脚本：`bash verification/run_control_demo.sh`（root，容器内），日志与 CSV 写到工作区外层的
-  `verification/control/`（不进 git）。脚本自带四个动作：构建、起 mock、起 agent、10 次发布并等待 ack。
+- 脚本：`bash verification/run_control_demo.sh`（root，容器内），日志与 CSV 写到仓库内
+  `verification/control/`（gitignore，不进 git）。脚本自带四个动作：构建、起 mock、起 agent、10 次发布并等待 ack。
 - 每轮发布的字节都不同：契约 §6.4 的文档 B（63 B，含 `r-8080` 规则）逐轮改 `grace_ms` 的两个 varint 字节。
   文档里没有 version 字段，若字节相同，agent 会走 §6.3 的同内容快捷路径直接 ack（不下载、不 apply），
   那样测到的就不是「应用」。（第一次冒烟就是这么翻车的，见 §5 的 bug 记录。）
@@ -230,7 +230,7 @@ cargo build -p agent --features mock --bins   # probe-agent + control-mock
 bash verification/run_control_demo.sh         # root；退出码 0 = 10 次全部 ack
 ```
 
-产物在工作区外层：`verification/control/g1.csv`、`mock-*.log`、`agent-*.log`、`acks-*.json`、
+产物在仓库内：`verification/control/g1.csv`、`mock-*.log`、`agent-*.log`、`acks-*.json`、
 `state-*.json`、`phases.txt`。重跑会覆盖，端口随机（19000–19800）、临时目录 `mktemp -d`，
 所以可以反复跑。`CONTROL_DEMO_KEEP=1` 保留证书与 mock 配置，`CONTROL_DEMO_OUT=<dir>` 换输出目录。
 
