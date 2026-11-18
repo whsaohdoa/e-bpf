@@ -15,7 +15,7 @@
 - [ ] 门禁本地复现：`bash scripts/ci/run.sh bash scripts/ci/fmt.sh`、`bash scripts/ci/run.sh cargo clippy --workspace --exclude probe-ebpf --all-targets -- -D warnings`、按改动范围取 `cargo xtask test --layer l0|l1|l2|all`
 - [ ] 文档已更新，并列出改了哪份：STATUS / PROCESS / ADR / 契约（`README.md` ABI 表、`agent/proto/control.proto`、CSV 列序）/ 无
 - [ ] `CHANGELOG.md` 的 `## [Unreleased]` 已加一条（含 PR 号）
-- [ ] 无 `.env`、`target/`、CSV/日志、`out/`、工作区外层 `verification/` 产物
+- [ ] 无 `.env`、`target/`、CSV/日志、`out/`、`verification/` 下的运行产物
 - [ ] 体量 `additions ≤ 400` 且 `changedFiles ≤ 20`；超出时已填下方“拆分理由”
 
 ## 拆分理由（仅当超出体量门）

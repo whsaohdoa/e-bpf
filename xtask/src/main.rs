@@ -314,8 +314,8 @@ fn junit_paths() -> Vec<PathBuf> {
 
 // --------------------------------------------------------------------- e2e
 
-/// The bash suites hardcode `/workspace/{probe,verification}`, which is exactly
-/// how `docker-compose.yml` mounts the repository into the dev container.
+/// The legacy bash suite lives in the repository (`probe/verification/`). Inside the
+/// dev container the repository is mounted at `/workspace/probe`.
 const E2E_WORKSPACE: &str = "/workspace";
 
 /// Shell scripts still run by `cargo xtask e2e --legacy`.
@@ -432,12 +432,12 @@ fn run_e2e_pass(
 
 fn e2e_legacy(args: &[String]) -> Result<ExitCode, String> {
     let script = flag_value(args, "--script")?;
-    let workspace = Path::new(E2E_WORKSPACE);
-    if !workspace.join("probe").is_dir() {
+    let workspace = Path::new(E2E_WORKSPACE).join("probe");
+    if !workspace.is_dir() {
         return Err(format!(
-            "the legacy suites hardcode `{E2E_WORKSPACE}/probe` and `{E2E_WORKSPACE}/verification`.\n\
+            "the legacy suite lives in `probe/verification/` and runs from `{E2E_WORKSPACE}/probe`.\n\
              Run this command inside the dev container, where docker-compose mounts the \
-             repository at `{E2E_WORKSPACE}`:\n  docker compose exec aya-dev cargo xtask e2e --legacy"
+             repository at `{E2E_WORKSPACE}/probe`:\n  docker compose exec aya-dev cargo xtask e2e --legacy"
         ));
     }
 
@@ -453,7 +453,7 @@ fn e2e_legacy(args: &[String]) -> Result<ExitCode, String> {
             return Err(format!("missing script {}", path.display()));
         }
         let mut command = Command::new("bash");
-        command.arg(&path).current_dir(workspace);
+        command.arg(&path).current_dir(&workspace);
         run(command, name)?;
         ran += 1;
     }

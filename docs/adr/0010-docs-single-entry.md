@@ -44,14 +44,14 @@
 需要一次性排查；迁移期两处并存，容易误读。
 
 配套动作：修正残留指针（`README.md:423`、`control-center/README.md:7` 已改为仓库内）；
-执行外层清理 runbook（当前状态"未执行"）；`docs/README.md` 的权威矩阵需与本 ADR 保持一致。
+执行外层清理 runbook（2026-11-18 已执行，记录见该文件 §9）；`docs/README.md` 的权威矩阵需与本 ADR 保持一致。
 ## 证据（file:line 列表，路径相对仓库根 probe/）
 
 - `docs/README.md:3-4`：`probe/docs/` 是唯一入口，外层 `docs/` 已废弃。
 - `docs/README.md:12-24`：各文档唯一职责矩阵（含 adr/、runbooks/）。
 - `control-center/README.md:7`：计划指向仓库内 `docs/Train0-Plan-6x1.md`。
 - `README.md:423`：契约与 proto 均指向仓库内路径。
-- `docs/runbooks/outer-workspace-cleanup.md:3-5`：清理范围为外层 docs/ 与 verification/，状态未执行。
+- `docs/runbooks/outer-workspace-cleanup.md:3-5`：清理范围为外层 docs/ 与 verification/，状态已执行（2026-11-18，见该文件 §9）。
 - `docs/runbooks/outer-workspace-cleanup.md:18`：外层 verification 含运行产物，未确认前不删。
 - `AGENTS.md:96`：文档只保留单一来源，不在外层或其它目录复制。
 - 外层 `verification/TEST-PLAN.md` 379 行 vs 仓库内 `verification/TEST-PLAN.md` 428 行（2026-11-18 核对）。

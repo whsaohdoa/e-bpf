@@ -39,7 +39,7 @@
 | — | 仓库根（0 tag） | 首个 tag（CHANGELOG 已补） | 未开始 | `CHANGELOG.md` 已建；`git tag` 仍为空 | 建议 M4 验收后从 `v0.2-w2` 起，按 `docs/PROCESS.md` §5 |
 | — | `.github/`（仅 3 个 workflow） | CODEOWNERS、main 分支保护 | 未开始 | PR/ISSUE 模板已补（本分支）；无 CODEOWNERS、无保护规则 | 按 `docs/runbooks/repo-hardening.md` 执行 |
 | — | `probe/README.md:8,10,509,543` | 修订 5 处过时表述（见 `docs/README.md` §3） | 已完成 | 本分支已改 `README.md` 与契约 `:891` | 留档见 `docs/README.md` §3 |
-| — | `docs/README.md` 开场 | 外层 `docs/` 清理与迁移收尾 | 未开始 | 两份副本并存 | 按 `docs/runbooks/outer-workspace-cleanup.md` 执行 |
+| — | `docs/README.md` 开场 | 外层 `docs/` 清理与迁移收尾 | 已完成 | 外层 `docs/`、`verification/` 已于 2026-11-18 删除 | 备份 `.tmp/backup-20261118/`；记录见 `docs/runbooks/outer-workspace-cleanup.md` §9 |
 
 ## 3. 待拍板（D2–D10）
 

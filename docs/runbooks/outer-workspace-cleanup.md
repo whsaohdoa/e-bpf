@@ -1,6 +1,6 @@
 # 外层工作区重复副本清理
 
-- 状态：**未执行**，需人工确认后执行
+- 状态：**已执行**（2026-11-18），执行记录见 §9
 - 范围：`D:\repos\rust\eBPF\docs\`、`D:\repos\rust\eBPF\verification\`（均不在 git 内）
 - 目标：`probe/docs/`、`probe/verification/` 成为唯一来源，外层不再保留同名副本
 
@@ -135,4 +135,17 @@ cp -a ".tmp/backup-$DATE/verification" .
 
 ## 9. 是否已执行
 
-**未执行。** 执行后回填：日期、执行人、同名数/相同数/差异文件、外层独有清单、备份路径、删除结果、验证输出。
+**已执行，2026-11-18。** 执行记录：
+
+- 执行人：dsh agent（lead）。宿主无 Git Bash（只有 WSL `bash.exe`），逐步操作用 pwsh + .NET 文件 API 完成；语义与本文命令一致（`sha256` 用 `Get-FileHash -Algorithm SHA256`）。
+- 前置：`git -C probe status --short` 为空（分支 `docs/process-baseline`）；外层 `verification/` 最新写入 2026-11-17 21:24，无任务在写；D: 可用 67 GB。
+- 比对（实测比基线多 2 份同名，已复盘）：同名 **7** 份、字节相同 **6** 份；多出的是基线采样后新纳入仓库的 `run_perf.sh`、`traffic_gen.rs`（均字节相同），属基线漂移。
+  - `verification/TEST-PLAN.md`：外层 379 行 / 仓库 428 行（与基线一致，以仓库版为准）。
+  - `docs/Control-Agent-API-v1.md`：外层 1013 行 / 仓库 1015 行，4 行差异（外层“端口预留”，仓库“六个方法已实现”）；外层 mtime 2026-11-17、仓库 2026-11-18 → 以仓库版为准。`Train0-Plan-6x1.md` 字节相同。
+  - 外层独有：`.log` 93、`.csv` 29、遗留 `.sh` 3（`run_e2e.sh`、`run_e2e_ipv6.sh`、`run_aggregation.sh`，已被 `cargo xtask e2e` / `run_perf.sh` 取代，仅保留在备份），目录 3：`control/`（14）、`drawio-probe/`（54）、`perf/`（20）。
+  - 未知 `.md` 判定：`perf/RESULTS-A9.md` 被 `verification/REPORT-aggregation.md` §6 引用，按“收入仓库”处理；与 `perf-*.txt`、`perf-summary.tsv`、`perf-capability.txt` 一起复制到仓库 `verification/perf/`，`control/` 目录同样复制到 `verification/control/`（两者均在 `verification/.gitignore` 内，不进 git）。
+- 备份：`D:\repos\rust\eBPF\.tmp\backup-20261118\`（`docs/` 2 + `verification/` 220 = 222 文件，22.3 MB；逐文件 sha256 与源比对，0 不一致）。保留到 2026-11-25 之后。
+- 删除：外层 `docs/`、`verification/` 已删除（`Test-Path` 均 False）。
+- 引用同步（同一批改动）：`verification/run_control_demo.sh` 默认输出 `../verification/control` → `$REPO/verification/control`；`verification/run_perf.sh` 的 `GEN_SRC`、`PERF_DIR` 默认值由 `/workspace/verification/…` 改为 `/workspace/probe/verification/…`（否则性能脚本会把外层 `verification/` 复活）；`xtask/src/main.rs` 的 `e2e --legacy` 路径改为仓库内 `/workspace/probe/verification/`；`verification/.gitignore` 增 `control/`；`REPORT-control-plane.md`、`REPORT-aggregation.md` 去掉“工作区外层”表述；`docs/README.md`、`docs/runbooks/00-README.md`、`docs/adr/0010-docs-single-entry.md`、`docs/backlog.md`、`AGENTS.md`、`CONTRIBUTING.md`、`.github/ISSUE_TEMPLATE/bug.md`、`.github/PULL_REQUEST_TEMPLATE.md` 同步更新。
+- 验证：`probe/verification/TEST-PLAN.md` 428 行；`REPORT-control-plane.md` 存在；外层两目录不存在；`git check-ignore` 命中 `verification/control/g1.csv`、`verification/perf/RESULTS-A9.md`；仓库内 `grep` 已无指向外层 docs/verification 的现行引用（仅剩历史记录句）；容器内 `cargo check -p xtask`、`bash -n verification/run_perf.sh` 通过；`git -C probe status --short` 只剩本批改动。
+- 回滚：见 §8（备份目录 `.tmp/backup-20261118/`）。

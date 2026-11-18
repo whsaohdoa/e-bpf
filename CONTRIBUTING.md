@@ -7,7 +7,7 @@
 
 | 事实 | 说明 |
 |---|---|
-| git 根 = 本目录 | 工作区外层（`D:\repos\rust\eBPF`）不是仓库；仓库内文档在 `docs/`，`out/` 等运行产物在外层 |
+| git 根 = 本目录 | 工作区外层（`D:\repos\rust\eBPF`）不是仓库；文档与 `verification/` 产物都在仓库内，外层只剩 `out/`、`.tmp/` |
 | 宿主没有 Rust 工具链 | Windows 宿主没有 `cargo`/`rustup`，所有 Rust 命令都在容器里跑 |
 | 开发容器 | `docker compose` 服务名 `aya-dev`，特权 + host 网络 + memlock 无限制，工作目录 `/workspace` |
 | 路径映射 | 宿主工作区 ↔ 容器 `/workspace`，因此仓库在容器里是 `/workspace/probe` |
@@ -17,8 +17,9 @@ docker compose exec aya-dev bash -lc 'cd /workspace/probe && <cmd>'
 ```
 
 `docker-compose.yml` 的默认挂载是 `probe/` 自身；当前开发容器把**外层目录**挂到 `/workspace`
-（所以 `/workspace/probe` 就是仓库）。若按默认值启动，真机脚本依赖的 `/workspace/probe`、
-`/workspace/verification` 不存在，需要用 `AYA_DEV_WORKSPACE_HOST` 指到外层。
+（所以 `/workspace/probe` 就是仓库）。若按默认值只挂 `probe/`，真机脚本依赖的 `/workspace/probe`
+不存在，需要用 `AYA_DEV_WORKSPACE_HOST` 指到外层；脚本与产物都在仓库 `probe/verification/` 内，
+外层 `verification/` 已于 2026-11-18 删除，不再需要。
 
 ## 2. 构建与运行
 

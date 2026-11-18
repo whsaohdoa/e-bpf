@@ -29,5 +29,5 @@
 
 | 文件 | 用途 | 状态 |
 |---|---|---|
-| `outer-workspace-cleanup.md` | 清理外层 `docs/`、`verification/` 重复副本 | 未执行 |
+| `outer-workspace-cleanup.md` | 清理外层 `docs/`、`verification/` 重复副本 | 已执行（2026-11-18，见该文件 §9） |
 | `repo-hardening.md` | GitHub 侧仓库加固（Issues、模板、gate 规则、分支清理） | 未执行 |

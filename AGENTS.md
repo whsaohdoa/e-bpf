@@ -6,7 +6,7 @@
 
 | 路径 | 角色 |
 |---|---|
-| `D:\repos\rust\eBPF` | 工作区外层，**不是** git 仓库；`verification/`（日志/CSV）、`docs/`（Train 0 计划）、`out/`、`.tmp/` 都在这层 |
+| `D:\repos\rust\eBPF` | 外层目录，**不是** git 仓库；只剩 `out/`、`.tmp/`、`diagrams/`、`probe-backup-*.bundle`（`docs/`、`verification/` 已于 2026-11-18 删除，见 `probe/docs/runbooks/outer-workspace-cleanup.md` §9） |
 | `D:\repos\rust\eBPF\probe` | **唯一 git 仓库根**，Cargo workspace 根，也是本文件所在目录 |
 | `probe/` | 用户态 crate（CLI、attach、ringbuf 消费、CSV） |
 | `control-center/` | **独立的 Spring + Postgres + SPA + k3d 子项目**，有自己的 README/Makefile/scripts，见 §6 |
@@ -62,7 +62,7 @@ cargo xtask soak --minutes N             # 占位，未实现
 
 - 不要在 Windows 宿主直接 `cargo build/test`（无工具链，且 BPF 构建需要 Linux）。
 - 不要跑 `sudo cargo test`：特权只属于 e2e/attach。
-- 不要把 `.env`、`target/`、CSV/日志、`out/`、工作区外层 `verification/` 的产物提交进仓库。
+- 不要把 `.env`、`target/`、CSV/日志、`out/`、`verification/` 下的运行产物提交进仓库（`probe/verification/.gitignore` 已忽略）。
 - 不要绕过 `cargo xtask` 手拼测试命令（分层与 JUnit 输出都依赖它）。
 - 不要在 `probe-ebpf` 里用 `std`、动态分配或浮点。
 - 不要删除 `probe-backup-*.bundle`、`.git`、`verification/run_perf.sh`。

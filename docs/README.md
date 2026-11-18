@@ -1,7 +1,7 @@
 # 文档入口（docs/）
 
-`probe/docs/` 是本仓库**唯一**的文档入口。外层工作区 `D:\repos\rust\eBPF\docs\` 已废弃，
-迁移与清理见 `docs/runbooks/outer-workspace-cleanup.md`（由并行任务落地）。新文档一律写进仓库，不再写到外层工作区。
+`probe/docs/` 是本仓库**唯一**的文档入口。外层工作区 `D:\repos\rust\eBPF\docs\` 已于 2026-11-18 删除，
+外层 `verification/` 同批清理，记录见 `docs/runbooks/outer-workspace-cleanup.md` §9。新文档一律写进仓库，不再写到外层工作区。
 
 ## 1. 权威矩阵
 

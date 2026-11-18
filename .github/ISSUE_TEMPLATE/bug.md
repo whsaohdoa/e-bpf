@@ -48,7 +48,7 @@ assignees: ''
 
 ## 证据
 
-<!-- 日志、CSV、JUnit、截图路径。仓库内路径写相对路径；工作区外层写 verification/ 或 out/ 下的相对路径。 -->
+<!-- 日志、CSV、JUnit、截图路径。仓库内路径写相对路径；产物在 `verification/` 下（已 gitignore）；外层只剩 `out/`。 -->
 
 - 日志：
 - 产物：
