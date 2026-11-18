@@ -240,6 +240,9 @@ Context 放 AgentPrincipal(agentId, fingerprint, groupId, status)，finally 里 
 要点：
 
 - `agent_id` **只**来自证书 CN；报文里没有该字段，任何「报文声明身份」都要被忽略（契约 §1）。
+- 上下文**必须**用 `io.grpc.Contexts.interceptCall(context, call, headers, next)` 交给后续链：`Context#attach()`
+  只对当前线程生效，gRPC 在 `onHalfClose` 的线程里读不到，服务端会报 `agent identity interceptor did not run`
+  （T3.2 实测踩坑，见计划 §10 勘误 7）。
 - 指纹比对用**握手证书重新算**的值，不读任何 header（契约明说 agent 不上报）。
 - 指纹不符与 CN 查不到**同码** `agent.identity_mismatch`：不泄露「这个 CN 存在但指纹错」。代价是轮换
   只能「先改库再重启 agent」，运维步骤写进 README：`UPDATE control.agent SET cert_fingerprint=... WHERE

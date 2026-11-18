@@ -5,6 +5,10 @@ server:
 spring:
   application:
     name: cc-service
+  # The runtime role doubles as a Spring profile so that control-plane-only
+  # configuration (gRPC + agent mTLS) is not loaded by the mgmt process.
+  profiles:
+    active: ${CC_ROLE:mgmt}
   lifecycle:
     timeout-per-shutdown-phase: 20s
   datasource:
@@ -49,3 +53,33 @@ cc:
 logging:
   pattern:
     level: "%5p [${spring.application.name:-},%X{request_id:-}]"
+
+---
+# Control-plane only (T3.1): agent mTLS gRPC endpoint on :9090. Kept in its own
+# profile document so the mgmt process neither mounts nor reads agent certificates
+# (Spring Boot 4 eagerly materialises every configured SSL bundle for metrics).
+spring:
+  config:
+    activate:
+      on-profile: control
+  ssl:
+    bundle:
+      pem:
+        cc-agent-server:
+          keystore:
+            certificate: ${CC_TLS_CERT:/etc/cc/tls/server.crt}
+            private-key: ${CC_TLS_KEY:/etc/cc/tls/server.key}
+          truststore:
+            certificate: ${CC_TLS_CA:/etc/cc/tls/ca.crt}
+  grpc:
+    server:
+      port: ${CC_GRPC_PORT:9090}
+      servlet:
+        enabled: false
+      inbound:
+        message:
+          max-size: 4MB
+      ssl:
+        bundle: cc-agent-server
+        client-auth: require
+

@@ -10,8 +10,8 @@ spec:
     - name: http
       port: 8080
       targetPort: http
-    # Agent control plane (gRPC + mTLS). Reserved for the next branch: the
-    # server side does not exist yet, so nothing listens on 9090 today.
+    # Agent control plane (gRPC + mTLS). Only cc.role=control serves this port; the
+    # `allow-control-grpc-from-agents` NetworkPolicy is the only ingress path to it.
     - name: grpc
       port: 9090
       targetPort: grpc
@@ -64,6 +64,20 @@ spec:
                 secretKeyRef:
                   name: cc-secrets
                   key: migrator-password
+            # PEM material for the gRPC server (mTLS). The secret is created out of
+            # band with `kubectl create secret generic control-plane-tls
+            # --from-file=server.crt --from-file=server.key --from-file=ca.crt` and is
+            # mounted read-only; these paths match the application defaults.
+            - name: CC_TLS_CERT
+              value: /etc/cc/tls/server.crt
+            - name: CC_TLS_KEY
+              value: /etc/cc/tls/server.key
+            - name: CC_TLS_CA
+              value: /etc/cc/tls/ca.crt
+          volumeMounts:
+            - name: control-plane-tls
+              mountPath: /etc/cc/tls
+              readOnly: true
           readinessProbe:
             httpGet:
               path: /actuator/health/readiness
@@ -89,3 +103,7 @@ spec:
             runAsNonRoot: true
             runAsUser: 10001
             runAsGroup: 10001
+      volumes:
+        - name: control-plane-tls
+          secret:
+            secretName: control-plane-tls

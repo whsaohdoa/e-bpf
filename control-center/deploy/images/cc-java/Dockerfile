@@ -32,7 +32,9 @@ COPY --from=build /build/app/target/cc-service-*.jar /app/app.jar
 RUN chown -R 10001:10001 /app
 
 USER 10001
-EXPOSE 8080
+# 8080: REST (both roles). 9090: agent gRPC + mTLS (cc.role=control only); the
+# management role never binds it, but the image is shared, so both are declared.
+EXPOSE 8080 9090
 
 # exec keeps the JVM as PID 1 so SIGTERM triggers Spring's graceful shutdown directly;
 # no init shim is needed.

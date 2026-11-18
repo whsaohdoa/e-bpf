@@ -96,11 +96,11 @@ spec:
         - port: 5432
 
 ---
-# The agent control plane will listen on 9090 (gRPC + mTLS). `allow-control-from-mgmt-only`
-# above stays the only rule for 8080 — do not widen it. Agents run outside the cluster (the
-# host's `probe-agent`), so no pod selector can name them: the empty `from` admits any source
-# and the client certificate carries the identity. There is no server on 9090 yet (Train 0
-# only ships the Rust side), so this rule is reserved space for the next branch.
+# The agent control plane listens on 9090 (gRPC + mTLS, cc.role=control only).
+# `allow-control-from-mgmt-only` above stays the only rule for 8080 — do not widen it. Agents
+# run outside the cluster (the host's `probe-agent`), so no pod selector can name them: the
+# empty `from` admits any source and the client certificate carries the identity. Train 0 only
+# verifies this channel in compose; wiring the agent namespace in k3d is E8 work.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

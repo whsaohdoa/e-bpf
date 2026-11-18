@@ -75,8 +75,12 @@ jobs:
 
       - name: 后端打包
         working-directory: control-center/app
+        # gRPC 服务端与本分支的单测让这一步明显变长，单独设上限；超时说明测试挂死，
+        # 不要靠加时间掩盖。
+        timeout-minutes: 20
         # 测试自本分支起存在（ProtoVectorTest 等），所以不再 `-DskipTests`；
         # 需要真 PG 的用例靠 @EnabledIfEnvironmentVariable(CC_IT_PG) 在 CI 自动跳过。
+        # 这里**不设** CC_IT_PG（PG 用例按 D7 自动 skip）。
         # `-ntp` 只是让日志里没有下载进度条。
         run: mvn -B -ntp package
 
