@@ -22,7 +22,7 @@ git remote -v                  # origin = https://github.com/whsaohdoa/e-bpf.git
 
 不变的事实：
 
-- 提交风格：Conventional Commits（`feat:` / `fix:` / `refactor:` / `test:` / `docs:` / `ci:` / `chore:`），正文中英均可。
+- 提交风格：Conventional Commits，type 白名单 9 种（`feat` / `fix` / `refactor` / `test` / `docs` / `ci` / `chore` / `build` / `perf`），正文中英均可；细则见 `docs/PROCESS.md` §3。
 - 备份 `probe-backup-*.bundle`（git bundle，在工作区外层）**不要删**。
 - 功能分支合并后即删；远端只保留长期分支。
 - 本机 git 到 `github.com:443` 曾不通（schannel `SEC_E_NO_CREDENTIALS`），只有 `gh api` 可走；推不动时先确认是网络还是凭据，别反复强推。
@@ -86,9 +86,14 @@ cargo xtask soak --minutes N             # 占位，未实现
 | 测试分层设计与用例编号 | `verification/TEST-PLAN.md` |
 | S1–S3 分层测试、S4 e2e、聚合验收证据 | `verification/REPORT-layered-tests.md`、`REPORT-e2e.md`、`REPORT-aggregation.md` |
 | 控制中心边界、部署、迁移 | `control-center/README.md` |
-| Train 0 计划（仓库外） | 工作区 `docs/Train0-Plan-6x1.md` |
+| 跨切片状态与今日优先级（每日必看） | `docs/STATUS.md` |
+| 协作流程（分支/PR/评审/发布） | `docs/PROCESS.md` |
+| 待办与优先级 | `docs/backlog.md` |
+| 架构决策记录 | `docs/adr/` |
+| 一次性/运维操作手册 | `docs/runbooks/` |
+| Train 0 计划 | `docs/Train0-Plan-6x1.md` |
 
-工作区外层的 `AGENTS.md` 只是指向本文件的指针；内容以本文件为准。
+工作区外层的 `AGENTS.md` 只是指向本文件的指针；内容以本文件为准。文档只保留单一来源，不要在工作区外层或其它目录复制一份。
 
 ## 8. 省 token（硬约束）
 

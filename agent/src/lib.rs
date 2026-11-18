@@ -13,8 +13,8 @@
 //! The S-C half attaches the real data path ([`driver`], [`crate::driver::DataPlane`])
 //! and drives it from the same loop; the agent never blocks the data path.
 //!
-//! Contract: `docs/Control-Agent-API-v1.md` (kept outside this repository, see
-//! `AGENTS.md`).
+//! Contract: `docs/Control-Agent-API-v1.md` (in this repository; see
+//! `AGENTS.md` for the doc index).
 
 pub mod agent_loop;
 pub mod backoff;
